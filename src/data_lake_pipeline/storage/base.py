@@ -37,3 +37,9 @@ class StorageBackend(Protocol):
 
     def get_full_key(self, key: str) -> str:
         ...
+
+    def read_bytes(self, key: str) -> bytes:
+        ...
+
+    def write_bytes(self, key: str, data: bytes) -> None:
+        ...

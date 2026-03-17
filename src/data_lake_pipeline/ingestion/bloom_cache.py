@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import TYPE_CHECKING, Iterator
 
 from pybloom_live import ScalableBloomFilter
+from tqdm import tqdm
 
 from data_lake_pipeline.ingestion.stats import IngestStats
 
@@ -26,10 +28,10 @@ def _bloom_key(cache_prefix: str) -> str:
 def load_or_create_bloom(storage: StorageBackend, cache_prefix: str) -> ScalableBloomFilter:
     key = _bloom_key(cache_prefix)
     try:
-        import smart_open
-        uri = storage.get_full_key(key)
-        with smart_open.open(uri, "rb") as f:
-            return ScalableBloomFilter.fromfile(f)
+        with tqdm(desc="Loading bloom filter from S3", unit="B", unit_scale=True) as pbar:
+            data = storage.read_bytes(key)
+            pbar.update(len(data))
+        return ScalableBloomFilter.fromfile(io.BytesIO(data))
     except Exception:
         pass
     logger.info("Creating new bloom filter at %s", key)
@@ -41,11 +43,13 @@ def load_or_create_bloom(storage: StorageBackend, cache_prefix: str) -> Scalable
 
 
 def save_bloom(bloom: ScalableBloomFilter, storage: StorageBackend, cache_prefix: str) -> None:
-    import smart_open
     key = _bloom_key(cache_prefix)
-    uri = storage.get_full_key(key)
-    with smart_open.open(uri, "wb") as f:
-        bloom.tofile(f)
+    buffer = io.BytesIO()
+    bloom.tofile(buffer)
+    data = buffer.getvalue()
+    with tqdm(total=len(data), desc="Saving bloom filter to S3", unit="B", unit_scale=True) as pbar:
+        storage.write_bytes(key, data)
+        pbar.update(len(data))
     logger.info("Saved bloom filter to %s", key)
 
 

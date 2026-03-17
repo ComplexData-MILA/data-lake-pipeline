@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 from zoneinfo import ZoneInfo
 
+from tqdm import tqdm
+
 from data_lake_pipeline.ingestion.bloom_cache import (
     filter_new_notes,
     load_or_create_bloom,
@@ -71,9 +73,16 @@ def _construct_url(date: datetime) -> str:
 
 def _download_zip_to_temp(url: str) -> Path:
     with urllib.request.urlopen(url, timeout=120) as response:
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            tmp.write(response.read())
-            return Path(tmp.name)
+        total_size = int(response.headers.get("Content-Length", 0))
+        with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading zip", disable=total_size == 0) as pbar:
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                    pbar.update(len(chunk))
+                return Path(tmp.name)
 
 
 def _parse_tsv_from_zip(zip_path: Path, stats: IngestStats) -> Iterator[dict[str, Any]]:
@@ -198,16 +207,20 @@ def fetch_x_community_notes(
 
     zip_path = _download_zip_to_temp(url)
     rows = _parse_tsv_from_zip(zip_path, stats)
+    rows = tqdm(rows, desc="Parsing TSV", unit="rows")
 
     threshold_ms = _get_timestamp_threshold(backfill_days)
     rows = _filter_by_timestamp(rows, threshold_ms, stats)
+    rows = tqdm(rows, desc="Filtering by timestamp", unit="rows")
 
     if incremental:
         bloom = load_or_create_bloom(storage, cache_prefix)
         rows = filter_new_notes(rows, bloom, stats)
+        rows = tqdm(rows, desc="Deduplicating", unit="rows")
         save_bloom(bloom, storage, cache_prefix)
 
     rows = islice(rows, limit)
+    rows = tqdm(rows, desc="Converting to SourcePost", unit="rows")
     posts = (_row_to_source_post(r) for r in rows)
 
     return posts, stats

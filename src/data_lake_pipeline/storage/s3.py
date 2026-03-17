@@ -6,6 +6,7 @@ from typing import Iterator
 
 import boto3
 import smart_open
+from tqdm import tqdm
 
 
 class S3Storage:
@@ -64,17 +65,21 @@ class S3Storage:
 
         existing = []
         if self.object_exists(key):
-            with smart_open.open(uri, "r", encoding="utf-8", transport_params=transport_params) as f:
-                for line in f:
-                    existing.append(line.rstrip("\n"))
+            with tqdm(desc="Reading existing records", unit="rows") as pbar:
+                with smart_open.open(uri, "r", encoding="utf-8", transport_params=transport_params) as f:
+                    for line in f:
+                        existing.append(line.rstrip("\n"))
+                        pbar.update(1)
 
         count = 0
-        with smart_open.open(uri, "w", encoding="utf-8", transport_params=transport_params) as f:
-            for line in existing:
-                f.write(line + "\n")
-            for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                count += 1
+        with tqdm(desc="Writing records to S3", unit="rows") as pbar:
+            with smart_open.open(uri, "w", encoding="utf-8", transport_params=transport_params) as f:
+                for line in existing:
+                    f.write(line + "\n")
+                for record in records:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    count += 1
+                    pbar.update(1)
         return count
 
     def put_json(self, key: str, data: dict, if_none_match: bool = False) -> bool:
@@ -148,3 +153,15 @@ class S3Storage:
             return True
         except Exception:
             return False
+
+    def read_bytes(self, key: str) -> bytes:
+        uri = self.get_full_key(key)
+        transport_params = self._get_transport_params()
+        with smart_open.open(uri, "rb", transport_params=transport_params) as f:
+            return f.read()
+
+    def write_bytes(self, key: str, data: bytes) -> None:
+        uri = self.get_full_key(key)
+        transport_params = self._get_transport_params()
+        with smart_open.open(uri, "wb", transport_params=transport_params) as f:
+            f.write(data)
