@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Iterable, Iterator
+
+from data_lake_pipeline.io import append_jsonl
+from data_lake_pipeline.schemas import LandedRecord, SourcePost
+
+if TYPE_CHECKING:
+    from data_lake_pipeline.storage.base import StorageBackend
+
+
+def save_source_posts(
+    source_name: str,
+    posts: Iterable[SourcePost],
+    storage: StorageBackend,
+    landing_prefix: str = "01_landing",
+) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    key = f"{landing_prefix}/{source_name}/{today}.jsonl"
+
+    def _validate_and_convert() -> Iterator[LandedRecord]:
+        for post in posts:
+            if post.source != source_name:
+                raise ValueError(f"Post source mismatch: expected {source_name}, got {post.source}")
+            yield post.to_landed_record()
+
+    written = append_jsonl(storage, key, _validate_and_convert())
+    return written
