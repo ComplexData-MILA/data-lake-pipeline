@@ -33,6 +33,13 @@ class MockStorage:
         full_key = f"{self.prefix}/{key}" if self.prefix else key
         return self._objects.get(full_key)
 
+    def add_object(self, key: str, data: bytes):
+        self._set_object(key, data)
+
+    def add_jsonl_object(self, key: str, records: list[dict]):
+        lines = [json.dumps(r, ensure_ascii=False) for r in records]
+        self._set_object(key, "\n".join(lines).encode("utf-8"))
+
     def stream_jsonl(self, key: str) -> Iterator[dict]:
         data = self._get_object(key)
         if data:
@@ -122,7 +129,9 @@ class MockStorage:
             age_seconds=age_seconds,
         )
 
-    def list_objects_with_metadata(self, prefix: str, suffix: str = "") -> list[ObjectMetadata]:
+    def list_objects_with_metadata(
+        self, prefix: str, suffix: str = ""
+    ) -> list[ObjectMetadata]:
         results = []
         for full_key, data in self._objects.items():
             if self.prefix:
@@ -131,7 +140,9 @@ class MockStorage:
                 key = full_key
             if key.startswith(prefix):
                 if not suffix or key.endswith(suffix):
-                    last_modified = self._created_times.get(full_key, datetime.now(timezone.utc))
+                    last_modified = self._created_times.get(
+                        full_key, datetime.now(timezone.utc)
+                    )
                     now = datetime.now(timezone.utc)
                     age_seconds = int((now - last_modified).total_seconds())
                     results.append(
@@ -199,6 +210,9 @@ class MockBatchState:
 
     def list_failed(self) -> list[MockBatchManifest]:
         return [m for m in self._manifests.values() if m.state == "failed"]
+
+    def list_all(self) -> list[MockBatchManifest]:
+        return list(self._manifests.values())
 
 
 @pytest.fixture

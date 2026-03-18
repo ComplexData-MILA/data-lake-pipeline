@@ -34,7 +34,9 @@ class BatchState:
             return BatchManifest.from_dict(data)
         return None
 
-    def put_manifest(self, manifest: BatchManifest, if_none_match: bool = False) -> bool:
+    def put_manifest(
+        self, manifest: BatchManifest, if_none_match: bool = False
+    ) -> bool:
         return self.storage.put_json(
             self._manifest_key(manifest.batch_id),
             manifest.to_dict(),
@@ -73,7 +75,9 @@ class BatchState:
             return manifest
         return None
 
-    def complete_batch(self, manifest: BatchManifest, output_key: str, row_count: int) -> None:
+    def complete_batch(
+        self, manifest: BatchManifest, output_key: str, row_count: int
+    ) -> None:
         manifest.state = "completed"
         manifest.output_key = output_key
         manifest.row_count = row_count
@@ -120,5 +124,14 @@ class BatchState:
             batch_id = key.split("/")[-1].replace(".json", "")
             manifest = self.get_manifest(batch_id)
             if manifest and manifest.state == "failed":
+                manifests.append(manifest)
+        return manifests
+
+    def list_all(self) -> list[BatchManifest]:
+        manifests = []
+        for key in self.storage.list_objects(MANIFESTS_PREFIX, ".json"):
+            batch_id = key.split("/")[-1].replace(".json", "")
+            manifest = self.get_manifest(batch_id)
+            if manifest:
                 manifests.append(manifest)
         return manifests

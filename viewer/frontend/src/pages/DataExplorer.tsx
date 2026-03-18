@@ -1,6 +1,15 @@
-import { QueryEditor } from '../components/QueryEditor'
+import { useState, useCallback } from 'react'
+import { DataTable } from '../components/DataTable'
+import { FilterBar } from '../components/FilterBar'
+import { RecordFilter } from '../hooks/useRecords'
 
 export const DataExplorer = () => {
+  const [filters, setFilters] = useState<RecordFilter[]>([])
+
+  const handleFilterChange = useCallback((newFilters: RecordFilter[]) => {
+    setFilters(newFilters)
+  }, [])
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -8,15 +17,12 @@ export const DataExplorer = () => {
       </div>
 
       <div className="bg-gray-50 p-4 rounded-lg text-sm text-gray-600">
-        <p className="font-medium mb-2">Query the data lake using SQL:</p>
-        <ul className="list-disc list-inside space-y-1">
-          <li><code className="bg-gray-200 px-1 rounded">lake.processed_posts</code> - Processed social posts</li>
-          <li><code className="bg-gray-200 px-1 rounded">lake.annotations</code> - Post annotations</li>
-          <li><code className="bg-gray-200 px-1 rounded">lake.metrics</code> - Pipeline metrics</li>
-        </ul>
+        <p>Query processed and annotated data from the data lake. Use filters to find specific content without writing SQL.</p>
       </div>
 
-      <QueryEditor />
+      <FilterBar stage="processed" filters={filters} onChange={handleFilterChange} />
+
+      <DataTable stage="processed" filters={filters} />
     </div>
   )
 }

@@ -15,3 +15,10 @@ export async function fetchJson<T>(path: string, options?: RequestInit): Promise
 
   return response.json()
 }
+
+export async function postJson<T>(path: string, body: unknown): Promise<T> {
+  return fetchJson<T>(path, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
