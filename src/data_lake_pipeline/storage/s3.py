@@ -8,6 +8,8 @@ import boto3
 import smart_open
 from tqdm import tqdm
 
+from data_lake_pipeline.storage.base import ObjectMetadata
+
 
 class S3Storage:
     def __init__(
@@ -165,3 +167,44 @@ class S3Storage:
         transport_params = self._get_transport_params()
         with smart_open.open(uri, "wb", transport_params=transport_params) as f:
             f.write(data)
+
+    def get_object_metadata(self, key: str) -> ObjectMetadata | None:
+        full_key = self._full_key(key)
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=full_key)
+            size_bytes = response["ContentLength"]
+            last_modified = response["LastModified"]
+            now = datetime.now(timezone.utc)
+            age_seconds = int((now - last_modified).total_seconds())
+            return ObjectMetadata(
+                key=key,
+                size_bytes=size_bytes,
+                last_modified=last_modified,
+                age_seconds=age_seconds,
+            )
+        except Exception:
+            return None
+
+    def list_objects_with_metadata(self, prefix: str, suffix: str = "") -> list[ObjectMetadata]:
+        full_prefix = self._full_key(prefix)
+        results = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=full_prefix):
+            for obj in page.get("Contents", []):
+                full_key = obj["Key"]
+                key = full_key
+                if self.prefix:
+                    key = full_key[len(self.prefix) + 1 :]
+                if not suffix or key.endswith(suffix):
+                    last_modified = obj["LastModified"]
+                    now = datetime.now(timezone.utc)
+                    age_seconds = int((now - last_modified).total_seconds())
+                    results.append(
+                        ObjectMetadata(
+                            key=key,
+                            size_bytes=obj["Size"],
+                            last_modified=last_modified,
+                            age_seconds=age_seconds,
+                        )
+                    )
+        return results

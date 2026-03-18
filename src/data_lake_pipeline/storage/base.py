@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterator, Protocol, runtime_checkable
+
+
+@dataclass
+class ObjectMetadata:
+    key: str
+    size_bytes: int
+    last_modified: datetime
+    age_seconds: int
 
 
 @runtime_checkable
@@ -42,4 +52,10 @@ class StorageBackend(Protocol):
         ...
 
     def write_bytes(self, key: str, data: bytes) -> None:
+        ...
+
+    def get_object_metadata(self, key: str) -> ObjectMetadata | None:
+        ...
+
+    def list_objects_with_metadata(self, prefix: str, suffix: str = "") -> list[ObjectMetadata]:
         ...

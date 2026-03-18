@@ -1,0 +1,32 @@
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY viewer/frontend/package*.json ./
+RUN npm ci
+COPY viewer/frontend/ ./
+RUN npm run build
+
+FROM python:3.11-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY pyproject.toml uv.lock ./
+COPY src/ ./src/
+
+RUN uv sync --frozen --no-dev
+
+COPY viewer/pyproject.toml viewer/uv.lock ./viewer/
+COPY viewer/backend/ ./viewer/backend/
+COPY viewer/__init__.py ./viewer/
+
+WORKDIR /app/viewer
+RUN uv sync --frozen --no-dev
+
+COPY --from=frontend-builder /app/frontend/dist ./backend/static
+
+ENV PYTHONPATH=/app
+EXPOSE 8080
+CMD ["uv", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080"]

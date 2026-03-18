@@ -1,6 +1,12 @@
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from typing import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from unittest.mock import Mock, MagicMock
 
 from data_lake_pipeline.storage.base import ObjectMetadata, StorageBackend
 
@@ -137,3 +143,89 @@ class MockStorage:
                         )
                     )
         return sorted(results, key=lambda x: x.key)
+
+
+class MockBatchManifest:
+    def __init__(
+        self,
+        batch_id: str,
+        source: str = "test-source",
+        state: str = "completed",
+        row_count: int = 100,
+        created_at: str | None = None,
+        locked_at: str | None = None,
+        locked_by: str | None = None,
+        error: str | None = None,
+    ):
+        self.batch_id = batch_id
+        self.source = source
+        self.state = state
+        self.row_count = row_count
+        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+        self.locked_at = locked_at
+        self.locked_by = locked_by
+        self.error = error
+
+    def to_dict(self):
+        return {
+            "batch_id": self.batch_id,
+            "source": self.source,
+            "state": self.state,
+            "row_count": self.row_count,
+            "created_at": self.created_at,
+            "locked_at": self.locked_at,
+            "locked_by": self.locked_by,
+            "error": self.error,
+        }
+
+
+class MockBatchState:
+    def __init__(self, storage: MockStorage):
+        self.storage = storage
+        self._manifests: dict[str, MockBatchManifest] = {}
+
+    def add_manifest(self, manifest: MockBatchManifest):
+        self._manifests[manifest.batch_id] = manifest
+        self.storage.put_json(f"manifests/{manifest.batch_id}.json", manifest.to_dict())
+
+    def get_manifest(self, batch_id: str) -> MockBatchManifest | None:
+        return self._manifests.get(batch_id)
+
+    def list_pending(self) -> list[MockBatchManifest]:
+        return [m for m in self._manifests.values() if m.state == "pending"]
+
+    def list_inflight(self) -> list[MockBatchManifest]:
+        return [m for m in self._manifests.values() if m.state == "inflight"]
+
+    def list_failed(self) -> list[MockBatchManifest]:
+        return [m for m in self._manifests.values() if m.state == "failed"]
+
+
+@pytest.fixture
+def mock_storage():
+    return MockStorage()
+
+
+@pytest.fixture
+def mock_batch_state(mock_storage: MockStorage):
+    return MockBatchState(mock_storage)
+
+
+@pytest.fixture
+def test_client(mock_storage: MockStorage, mock_batch_state: MockBatchState):
+    from viewer.backend.main import app
+    from viewer.backend.dependencies import get_storage, get_batch_state
+
+    def override_get_storage():
+        return mock_storage
+
+    def override_get_batch_state():
+        return mock_batch_state
+
+    app.dependency_overrides[get_storage] = override_get_storage
+    app.dependency_overrides[get_batch_state] = override_get_batch_state
+
+    client = TestClient(app)
+    yield client
+
+    app.dependency_overrides.clear()
