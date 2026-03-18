@@ -1,0 +1,24 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: viewer/Dockerfile.backend
+    env_file: ../.env
+    expose:
+      - "8080"
+    networks:
+      - viewer-net
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - viewer-net
+
+networks:
+  viewer-net:

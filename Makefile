@@ -31,7 +31,10 @@ viewer-test:
 	cd viewer && uv run pytest tests -q
 
 viewer-build:
-	docker build -t data-lake-viewer -f viewer/Dockerfile .
+	docker compose -f viewer/docker-compose.yml build
 
-viewer-run:
-	docker run -p 8080:8080 --env-file .env data-lake-viewer
+viewer-up:
+	docker compose -f viewer/docker-compose.yml up
+
+viewer-down:
+	docker compose -f viewer/docker-compose.yml down
