@@ -29,6 +29,9 @@ dev = [
   "ruff>=0.9.0",
 ]
 
+[project.scripts]
+merge-server = "data_lake_pipeline.merge_server.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
