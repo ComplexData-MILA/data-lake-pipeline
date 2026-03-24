@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+
+import pyarrow.parquet as pq
 from fastapi import APIRouter, Depends, Query
 
 from data_lake_pipeline.storage import StorageBackend
@@ -8,6 +11,8 @@ from viewer.backend.dependencies import get_storage, get_batch_state
 from viewer.backend.services.pipeline_status import PipelineStatusService
 
 router = APIRouter()
+
+ANNOTATIONS_PREFIX = "annotations"
 
 
 def get_status_service(
@@ -39,18 +44,54 @@ async def get_sources(
     storage: StorageBackend = Depends(get_storage),
     batch_state: BatchState = Depends(get_batch_state),
 ):
-    sources = set()
+    sources = {
+        parts[1]
+        for key in storage.list_objects("01_landing")
+        if len(parts := key.split("/")) > 1
+    } | {manifest.source for manifest in batch_state.list_all() if manifest.source}
+    return sorted(sources)
 
-    for key in storage.list_objects("01_landing"):
-        parts = key.split("/")
-        if len(parts) > 1:
-            sources.add(parts[1])
 
-    for manifest in batch_state.list_all():
-        if manifest.source:
-            sources.add(manifest.source)
+@router.get("/filters")
+async def get_available_filters(storage: StorageBackend = Depends(get_storage)):
+    manifest = storage.get_json(f"{ANNOTATIONS_PREFIX}/filter_manifest.json")
+    if manifest:
+        return {
+            "filters": manifest.get("filters", []),
+            "last_updated": manifest.get("last_updated"),
+        }
 
-    return sorted(list(sources))
+    filters = {
+        col.rsplit("_passed", 1)[0]
+        for key in storage.list_objects(ANNOTATIONS_PREFIX, "merged.parquet")
+        for col in pq.read_schema(io.BytesIO(storage.read_bytes(key))).names
+        if col.endswith("_passed")
+    }
+
+    return {"filters": sorted(filters), "last_updated": None}
+
+
+@router.get("/batch-filters")
+async def get_batch_filter_status(storage: StorageBackend = Depends(get_storage)):
+    manifests_prefix = "manifests/stages"
+
+    batches = [
+        {
+            "batch_id": data["batch_id"],
+            "pipeline_stage": data.get("pipeline_stage"),
+            "state": data["state"],
+            "completed_filters": [
+                f["filter_name"] for f in data.get("completed_filters", [])
+            ],
+            "has_merged": storage.object_exists(
+                f"annotations/{data['batch_id']}/merged.parquet"
+            ),
+        }
+        for key in storage.list_objects(manifests_prefix, ".json")
+        if (data := storage.get_json(key))
+    ]
+
+    return batches
 
 
 @router.get("/schema/{stage}")

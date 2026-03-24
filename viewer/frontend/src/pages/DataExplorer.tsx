@@ -1,14 +1,11 @@
-import { useState, useCallback } from 'react'
 import { DataTable } from '../components/DataTable'
 import { FilterBar } from '../components/FilterBar'
-import { RecordFilter } from '../hooks/useRecords'
+import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
+import { AlertTriangle } from 'lucide-react'
+import { usePageFilters } from '../hooks/usePageFilters'
 
 export const DataExplorer = () => {
-  const [filters, setFilters] = useState<RecordFilter[]>([])
-
-  const handleFilterChange = useCallback((newFilters: RecordFilter[]) => {
-    setFilters(newFilters)
-  }, [])
+  const { filters, filterStates, warning, setFilters, setFilterStates, setWarning } = usePageFilters()
 
   return (
     <div className="space-y-6">
@@ -16,13 +13,31 @@ export const DataExplorer = () => {
         <h1 className="text-2xl font-semibold">Data Explorer</h1>
       </div>
 
-      <div className="bg-gray-50 p-4 rounded-lg text-sm text-gray-600">
-        <p>Query processed and annotated data from the data lake. Use filters to find specific content without writing SQL.</p>
+      <div className="bg-muted/50 p-4 rounded-lg text-sm text-muted-foreground">
+        <p>Query processed and annotated data from the data lake. Use filters to find specific content.</p>
       </div>
 
-      <FilterBar stage="processed" filters={filters} onChange={handleFilterChange} />
+      <FilterBar
+        filters={filters}
+        onChange={setFilters}
+        filterStates={filterStates}
+        onFilterStatesChange={setFilterStates}
+        showAnnotationFilters={true}
+      />
 
-      <DataTable stage="processed" filters={filters} />
+      {warning && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Incomplete Data</AlertTitle>
+          <AlertDescription>{warning}</AlertDescription>
+        </Alert>
+      )}
+
+      <DataTable
+        filters={filters}
+        filterStates={filterStates}
+        onWarning={setWarning}
+      />
     </div>
   )
 }

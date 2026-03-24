@@ -1,15 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRecords, RecordFilter } from '../hooks/useRecords'
 import { RecordDetailDialog } from './RecordDetailDialog'
+import { FilterStates } from '../types/filters'
 
 interface DataTableProps {
-  stage: 'landing' | 'queue' | 'processed'
   filters: RecordFilter[]
+  filterStates?: FilterStates
   pageSize?: number
+  onWarning?: (warning: string | null) => void
 }
 
-export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => {
-  const { data, loading, error, fetchRecords } = useRecords(stage)
+export const DataTable = ({ filters, filterStates, pageSize = 50, onWarning }: DataTableProps) => {
+  const { data, loading, error, warning, fetchRecords } = useRecords()
   const [page, setPage] = useState(1)
   const [sortBy, setSortBy] = useState<string | undefined>()
   const [sortDesc, setSortDesc] = useState(false)
@@ -17,8 +19,12 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
   const [dialogOpen, setDialogOpen] = useState(false)
 
   useEffect(() => {
-    fetchRecords(page, pageSize, filters, sortBy, sortDesc)
-  }, [page, pageSize, filters, sortBy, sortDesc, fetchRecords])
+    fetchRecords(page, pageSize, filters, sortBy, sortDesc, filterStates)
+  }, [page, pageSize, filters, sortBy, sortDesc, filterStates, fetchRecords])
+
+  useEffect(() => {
+    if (onWarning) onWarning(warning)
+  }, [warning, onWarning])
 
   const handleSort = useCallback((column: string) => {
     if (sortBy === column) {
@@ -35,16 +41,16 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
   }, [])
 
   if (loading) {
-    return <div className="p-8 text-center text-gray-500">Loading...</div>
+    return <div className="p-8 text-center text-muted-foreground">Loading...</div>
   }
 
   if (error) {
     return (
-      <div className="p-8 text-center text-red-500">
+      <div className="p-8 text-center text-destructive">
         Error: {error}
         <button
-          onClick={() => fetchRecords(page, pageSize, filters, sortBy, sortDesc)}
-          className="ml-4 px-4 py-2 bg-blue-600 text-white rounded"
+          onClick={() => fetchRecords(page, pageSize, filters, sortBy, sortDesc, filterStates)}
+          className="ml-4 px-4 py-2 bg-primary text-primary-foreground rounded"
         >
           Retry
         </button>
@@ -53,7 +59,7 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
   }
 
   if (!data || data.records.length === 0) {
-    return <div className="p-8 text-center text-gray-500">No records found</div>
+    return <div className="p-8 text-center text-muted-foreground">No records found</div>
   }
 
   const startRow = (page - 1) * pageSize + 1
@@ -63,12 +69,12 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
     <div className="space-y-4">
       <div className="bg-white rounded-lg border overflow-x-auto">
         <table className="min-w-full">
-          <thead className="bg-gray-50">
+          <thead className="bg-muted/50">
             <tr>
               {data.columns.map((col) => (
                 <th
                   key={col}
-                  className="px-4 py-2 text-left text-sm font-medium text-gray-500 whitespace-nowrap cursor-pointer hover:bg-gray-100"
+                  className="px-4 py-2 text-left text-sm font-medium text-muted-foreground whitespace-nowrap cursor-pointer hover:bg-muted"
                   onClick={() => handleSort(col)}
                 >
                   <div className="flex items-center gap-1">
@@ -85,7 +91,7 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
             {data.records.map((record, i) => (
               <tr
                 key={i}
-                className="hover:bg-gray-50 cursor-pointer"
+                className="hover:bg-muted/50 cursor-pointer"
                 onClick={() => handleRowClick(record)}
               >
                 {data.columns.map((col) => (
@@ -100,7 +106,7 @@ export const DataTable = ({ stage, filters, pageSize = 50 }: DataTableProps) => 
       </div>
 
       <div className="flex items-center justify-between">
-        <div className="text-sm text-gray-500">
+        <div className="text-sm text-muted-foreground">
           Showing {startRow}-{endRow} of {data.total_count}
         </div>
         <div className="flex gap-2 items-center">
