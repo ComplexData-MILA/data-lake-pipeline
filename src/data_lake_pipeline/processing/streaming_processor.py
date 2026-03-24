@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 class StreamingStageProcessor:
     def __init__(
         self,
-        plugin: AsyncFilter | AsyncProcessor,
+        handler: AsyncFilter | AsyncProcessor,
         max_concurrent: int = 100,
     ) -> None:
-        self.plugin = plugin
+        self.handler = handler
         self.semaphore = Semaphore(max_concurrent)
 
     async def process_stream(
@@ -48,7 +48,7 @@ class StreamingStageProcessor:
         self, record: dict, context: StageContext
     ) -> FilterResult | ProcessorResult:
         async with self.semaphore:
-            results = await self.plugin([record], context)
+            results = await self.handler([record], context)
             return results[0]
 
     def _collect_completed(

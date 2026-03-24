@@ -6,7 +6,7 @@ This directory contains example implementations and configurations for the data 
 
 ```
 examples/
-├── openai_plugins/         # Example standalone filter/processor packages
+├── openai_filters/         # Example standalone filter/processor packages
 │   └── __init__.py
 ├── slurm/
 │   └── sglang_stage.sh     # SLURM job script template
@@ -24,7 +24,7 @@ Each filter/processor is a **standalone package** with its own CLI entrypoint. T
 3. Configuration (prompts, thresholds, models) via environment variables
 4. Each filter/processor can have its own cron job or SLURM job
 
-## OpenAI Plugins Example (`openai_plugins/`)
+## OpenAI Filters Example (`openai_filters/`)
 
 Example filter/processor implementations using OpenAI SDK. These can be used as templates for creating your own packages.
 
@@ -59,11 +59,11 @@ class QualityFilter(AsyncFilter):
 
 def main():
     settings = Settings.from_env()
-    plugin = QualityFilter(
+    handler = QualityFilter(
         threshold=float(os.getenv("QUALITY_FILTER_THRESHOLD", "0.7"))
     )
     asyncio.run(run_stage(
-        plugin=plugin,
+        handler=handler,
         stage_name="quality_filter",
         input_prefix=os.getenv("QUALITY_FILTER_INPUT_PREFIX", "02_pending"),
         output_prefix_base=os.getenv("QUALITY_FILTER_OUTPUT_PREFIX", "03_quality_filtered"),
@@ -170,9 +170,9 @@ from my_filter import MyFilter
 
 def main():
     settings = Settings.from_env()
-    plugin = MyFilter(threshold=float(os.getenv("MY_FILTER_THRESHOLD", "0.5")))
+    handler = MyFilter(threshold=float(os.getenv("MY_FILTER_THRESHOLD", "0.5")))
     asyncio.run(run_stage(
-        plugin=plugin,
+        handler=handler,
         stage_name="my_filter",
         input_prefix=os.getenv("MY_FILTER_INPUT_PREFIX", "02_pending"),
         output_prefix_base=os.getenv("MY_FILTER_OUTPUT_PREFIX", "03_my_filter"),
@@ -191,7 +191,7 @@ my-filter = "my_filter.cli:main"
 
 ```python
 async def run_stage(
-    plugin: AsyncFilter | AsyncProcessor,  # Your filter/processor instance
+    handler: AsyncFilter | AsyncProcessor,  # Your filter/processor instance
     *,
     stage_name: str,                        # Unique stage identifier
     input_prefix: str,                      # S3 prefix to read from

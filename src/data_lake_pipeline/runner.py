@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_stage(
-    plugin: AsyncFilter | AsyncProcessor,
+    handler: AsyncFilter | AsyncProcessor,
     *,
     stage_name: str,
     input_prefix: str,
@@ -36,11 +36,11 @@ async def run_stage(
 
     1. Optionally discovers/creates pending batches from input_prefix
     2. Claims a batch (specific or any pending)
-    3. Processes records through the plugin
+    3. Processes records through the handler
     4. Writes results with checkpointing
 
     Args:
-        plugin: AsyncFilter or AsyncProcessor instance
+        handler: AsyncFilter or AsyncProcessor instance
         stage_name: Unique name for this stage (used for manifest namespacing)
         input_prefix: S3 prefix to read input JSONL files from
         output_prefix_base: S3 prefix base for output (passed/ rejected/ subdirs)
@@ -76,7 +76,7 @@ async def run_stage(
         return False
 
     await _process_batch(
-        plugin=plugin,
+        handler=handler,
         manifest=manifest,
         state=state,
         settings=settings,
@@ -127,7 +127,7 @@ async def _ensure_pending_batches(
 
 
 async def _process_batch(
-    plugin: AsyncFilter | AsyncProcessor,
+    handler: AsyncFilter | AsyncProcessor,
     manifest: StageAwareBatchManifest,
     state: StageAwareBatchState,
     settings: Settings,
@@ -137,13 +137,13 @@ async def _process_batch(
     checkpoint_interval: int,
     is_filter: bool,
 ) -> None:
-    """Process a single batch through the plugin."""
+    """Process a single batch through the handler."""
     from data_lake_pipeline.processing.streaming_processor import (
         StreamingStageProcessor,
     )
 
     processor = StreamingStageProcessor(
-        plugin=plugin,
+        handler=handler,
         max_concurrent=max_concurrent,
     )
 

@@ -2,7 +2,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from tests.conftest import MockFilter, MockProcessor
+from conftest import MockFilter, MockProcessor
 from data_lake_pipeline.processing.streaming_processor import StreamingStageProcessor
 from data_lake_pipeline.protocols import FilterResult, ProcessorResult, StageContext
 
@@ -32,8 +32,8 @@ class TestStreamingStageProcessor:
         input_records = [make_record_dict(str(i)) for i in range(5)]
         stream = record_stream(input_records)
 
-        filter_plugin = MockFilter()
-        processor = StreamingStageProcessor(plugin=filter_plugin, max_concurrent=2)
+        filter_handler = MockFilter()
+        processor = StreamingStageProcessor(handler=filter_handler, max_concurrent=2)
 
         ctx = StageContext(stage_name="test", batch_id="batch1")
 
@@ -54,8 +54,8 @@ class TestStreamingStageProcessor:
         ]
         stream = record_stream(input_records)
 
-        filter_plugin = MockFilter(reject_keyword="reject")
-        processor = StreamingStageProcessor(plugin=filter_plugin, max_concurrent=2)
+        filter_handler = MockFilter(reject_keyword="reject")
+        processor = StreamingStageProcessor(handler=filter_handler, max_concurrent=2)
 
         ctx = StageContext(stage_name="test", batch_id="batch1")
 
@@ -75,8 +75,8 @@ class TestStreamingStageProcessor:
         input_records = [make_record_dict("abc"), make_record_dict("xyz")]
         stream = record_stream(input_records)
 
-        processor_plugin = MockProcessor()
-        processor = StreamingStageProcessor(plugin=processor_plugin, max_concurrent=2)
+        processor_handler = MockProcessor()
+        processor = StreamingStageProcessor(handler=processor_handler, max_concurrent=2)
 
         ctx = StageContext(stage_name="test", batch_id="batch1")
 
@@ -94,8 +94,8 @@ class TestStreamingStageProcessor:
         input_records = [make_record_dict(str(i)) for i in range(20)]
         stream = record_stream(input_records)
 
-        filter_plugin = MockFilter()
-        processor = StreamingStageProcessor(plugin=filter_plugin, max_concurrent=5)
+        filter_handler = MockFilter()
+        processor = StreamingStageProcessor(handler=filter_handler, max_concurrent=5)
 
         ctx = StageContext(stage_name="test", batch_id="batch1")
 
