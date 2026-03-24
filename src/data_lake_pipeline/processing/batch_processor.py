@@ -98,7 +98,7 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
                     source_file=req.source_file,
                     processed_at=processed_at,
                     raw_text=req.text,
-                ).to_dict()
+                ).model_dump(mode="json")
             )
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

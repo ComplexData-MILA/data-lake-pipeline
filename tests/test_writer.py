@@ -1,4 +1,3 @@
-import json
 
 from data_lake_pipeline.ingestion.writer import save_source_posts
 from data_lake_pipeline.schemas import SourcePost

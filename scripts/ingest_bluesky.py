@@ -12,8 +12,13 @@ def main() -> int:
     parser.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="Max posts to fetch (default: 50, 0 for all)",
+        default=100,
+        help="Max posts to fetch (default: 100, 0 for all)",
+    )
+    parser.add_argument(
+        "--no-incremental",
+        action="store_true",
+        help="Disable incremental mode (fetch all posts without deduplication)",
     )
     args = parser.parse_args()
 
@@ -25,11 +30,23 @@ def main() -> int:
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
     )
+    cache_prefix = "00_cache/bluesky"
 
     limit = args.limit if args.limit > 0 else None
-    posts = fetch_bluesky_top_posts(limit=limit, use_example_data=settings.use_example_source_data)
-    written = save_source_posts("bluesky", posts, storage=storage, landing_prefix=settings.landing_prefix)
+    posts, stats = fetch_bluesky_top_posts(
+        limit=limit,
+        use_example_data=settings.use_example_source_data,
+        storage=storage,
+        cache_prefix=cache_prefix,
+        incremental=not args.no_incremental,
+    )
+
+    written = save_source_posts(
+        "bluesky", posts, storage=storage, landing_prefix=settings.landing_prefix
+    )
+
     print(f"Wrote {written} Bluesky records to landing zone.")
+    print(f"Stats: {stats.to_dict()}")
     return 0
 
 

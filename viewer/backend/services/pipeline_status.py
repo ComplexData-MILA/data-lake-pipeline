@@ -109,7 +109,9 @@ class PipelineStatusService:
             else:
                 sources[src]["success_rate"] = 0.0
 
-        stuck_batches = self._detect_stuck_batches(manifests, self.stuck_threshold_seconds)
+        stuck_batches = self._detect_stuck_batches(
+            manifests, self.stuck_threshold_seconds
+        )
 
         recent_errors = [
             {
@@ -151,13 +153,15 @@ class PipelineStatusService:
             parts = obj.key.split("/")
             file_source = parts[2] if len(parts) > 2 else "unknown"
 
-            files.append({
-                "key": obj.key,
-                "source": file_source,
-                "size_bytes": obj.size_bytes,
-                "age_seconds": obj.age_seconds,
-                "last_modified": obj.last_modified.isoformat(),
-            })
+            files.append(
+                {
+                    "key": obj.key,
+                    "source": file_source,
+                    "size_bytes": obj.size_bytes,
+                    "age_seconds": obj.age_seconds,
+                    "last_modified": obj.last_modified.isoformat(),
+                }
+            )
             total_size += obj.size_bytes
 
         files.sort(key=lambda x: x.get("age_seconds", 0), reverse=True)
@@ -217,7 +221,7 @@ class PipelineStatusService:
             batch_id = key.split("/")[-1].replace(".json", "")
             manifest = self.batch_state.get_manifest(batch_id)
             if manifest:
-                manifests.append(manifest.to_dict())
+                manifests.append(manifest.model_dump(mode="json"))
         return manifests
 
     def _detect_stuck_batches(
@@ -239,13 +243,15 @@ class PipelineStatusService:
                     locked_at = locked_at.replace(tzinfo=timezone.utc)
                 elapsed = (now - locked_at).total_seconds()
                 if elapsed > threshold_seconds:
-                    stuck.append({
-                        "batch_id": m.get("batch_id"),
-                        "source": m.get("source"),
-                        "locked_at": locked_at_str,
-                        "locked_by": m.get("locked_by"),
-                        "stuck_seconds": int(elapsed),
-                    })
+                    stuck.append(
+                        {
+                            "batch_id": m.get("batch_id"),
+                            "source": m.get("source"),
+                            "locked_at": locked_at_str,
+                            "locked_by": m.get("locked_by"),
+                            "stuck_seconds": int(elapsed),
+                        }
+                    )
             except (ValueError, TypeError):
                 continue
 

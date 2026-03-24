@@ -126,7 +126,7 @@ async def query_queue_records(
     all_records = []
 
     for manifest in batch_state.list_all():
-        record = manifest.to_dict()
+        record = manifest.model_dump(mode="json")
         all_records.append(record)
 
     filtered = apply_filters(all_records, query.filters)

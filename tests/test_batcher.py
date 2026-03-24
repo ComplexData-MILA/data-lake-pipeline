@@ -1,10 +1,10 @@
-from data_lake_pipeline.orchestration.batcher import promote_stable_landing_files
 from data_lake_pipeline.state import BatchState
 from tests.conftest import MockStorage
 
 
 def _settings():
     from data_lake_pipeline.config import Settings
+
     return Settings(
         s3_bucket="test-bucket",
         s3_prefix="test-prefix",
@@ -13,9 +13,6 @@ def _settings():
         s3_secret_key=None,
         log_level="INFO",
         stable_file_age_minutes=30,
-        slurm_enabled=False,
-        slurm_command="sbatch",
-        slurm_script="slurm/slurm_job.sh",
         annotator_backend="mock",
         model_name="mock-model",
         prompt_template="Annotate: {text}",
@@ -30,7 +27,9 @@ def test_promote_stable_landing_files_creates_manifest():
     storage = MockStorage()
     state = BatchState(storage)
 
-    storage.append_jsonl("01_landing/reddit/2026-03-13.jsonl", iter([{"hello": "world"}]))
+    storage.append_jsonl(
+        "01_landing/reddit/2026-03-13.jsonl", iter([{"hello": "world"}])
+    )
 
     manifest = state.create_batch("reddit", "01_landing/reddit/2026-03-13.jsonl")
 

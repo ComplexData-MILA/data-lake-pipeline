@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
@@ -24,9 +27,6 @@ class Settings:
     s3_secret_key: str | None
     log_level: str
     stable_file_age_minutes: int
-    slurm_enabled: bool
-    slurm_command: str
-    slurm_script: str
     annotator_backend: str
     model_name: str
     prompt_template: str
@@ -34,13 +34,18 @@ class Settings:
     vllm_temperature: float
     vllm_max_tokens: int
     use_example_source_data: bool
+    slurm_enabled: bool
+    slurm_command: str
+    slurm_script: str
 
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
         s3_url = os.getenv("PIPELINE_S3_URL", "")
         if not s3_url:
-            raise ValueError("PIPELINE_S3_URL must be set (e.g., s3://my-bucket/data-project/)")
+            raise ValueError(
+                "PIPELINE_S3_URL must be set (e.g., s3://my-bucket/data-project/)"
+            )
         bucket, prefix = parse_s3_url(s3_url)
         return cls(
             s3_bucket=bucket,
@@ -52,10 +57,6 @@ class Settings:
             stable_file_age_minutes=int(
                 os.getenv("PIPELINE_STABLE_FILE_AGE_MINUTES", "30")
             ),
-            slurm_enabled=os.getenv("PIPELINE_SLURM_ENABLED", "false").lower()
-            == "true",
-            slurm_command=os.getenv("PIPELINE_SLURM_COMMAND", "sbatch"),
-            slurm_script=os.getenv("PIPELINE_SLURM_SCRIPT", "slurm/slurm_job.sh"),
             annotator_backend=os.getenv("PIPELINE_ANNOTATOR_BACKEND", "mock"),
             model_name=os.getenv("PIPELINE_MODEL_NAME", "Qwen/Qwen3.5-9B-Instruct"),
             prompt_template=os.getenv(
@@ -71,6 +72,10 @@ class Settings:
                 "PIPELINE_USE_EXAMPLE_SOURCE_DATA", "false"
             ).lower()
             == "true",
+            slurm_enabled=os.getenv("PIPELINE_SLURM_ENABLED", "false").lower()
+            == "true",
+            slurm_command=os.getenv("PIPELINE_SLURM_COMMAND", "sbatch"),
+            slurm_script=os.getenv("PIPELINE_SLURM_SCRIPT", "slurm/slurm_job.sh"),
         )
 
     @property

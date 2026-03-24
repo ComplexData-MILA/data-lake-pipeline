@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from datetime import datetime, timezone
 
 from data_lake_pipeline.config import Settings
 from data_lake_pipeline.logging_utils import configure_logging

@@ -21,16 +21,16 @@ async def list_manifests(
     states = None
     if state:
         states = [s.strip() for s in state.split(",") if s.strip()]
-    
+
     manifests = []
     for key in storage.list_objects(MANIFESTS_PREFIX, ".json"):
         batch_id = key.split("/")[-1].replace(".json", "")
         manifest = batch_state.get_manifest(batch_id)
         if manifest:
-            manifest_dict = manifest.to_dict()
+            manifest_dict = manifest.model_dump(mode="json")
             if states is None or manifest_dict.get("state") in states:
                 manifests.append(manifest_dict)
-    
+
     return manifests
 
 
@@ -42,4 +42,4 @@ async def get_manifest(
     manifest = batch_state.get_manifest(batch_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    return manifest.to_dict()
+    return manifest.model_dump(mode="json")

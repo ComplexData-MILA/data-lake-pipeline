@@ -1,8 +1,72 @@
 import json
+import random
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Any, Iterator
 
-from data_lake_pipeline.storage.base import ObjectMetadata, StorageBackend
+from data_lake_pipeline.protocols import (
+    AsyncFilter,
+    AsyncProcessor,
+    FilterResult,
+    ProcessorResult,
+    StageContext,
+)
+from data_lake_pipeline.storage.base import ObjectMetadata
+
+
+class MockFilter(AsyncFilter):
+    """Mock filter for testing. Optionally rejects based on keyword or random rate."""
+
+    def __init__(
+        self, reject_keyword: str = "reject", reject_rate: float = 0.0, **kwargs: Any
+    ) -> None:
+        self.reject_keyword = reject_keyword
+        self.reject_rate = reject_rate
+
+    async def __call__(
+        self, records: list[dict[str, Any]], context: StageContext
+    ) -> list[FilterResult]:
+        results = []
+        for record in records:
+            text = record.get("text", "")
+            if self.reject_keyword and self.reject_keyword in text.lower():
+                results.append(
+                    FilterResult(
+                        passed=False,
+                        reason=f"Contains reject keyword: {self.reject_keyword}",
+                        output={"rejected_by": "mock_filter"},
+                    )
+                )
+            elif self.reject_rate > 0 and random.random() < self.reject_rate:
+                results.append(
+                    FilterResult(
+                        passed=False,
+                        reason="Random rejection",
+                        output={"rejected_by": "mock_filter"},
+                    )
+                )
+            else:
+                results.append(FilterResult(passed=True, output={"mock": True}))
+        return results
+
+
+class MockProcessor(AsyncProcessor):
+    """Mock processor that returns mock output. For testing only."""
+
+    def __init__(self, output_field: str = "mock_field", **kwargs: Any) -> None:
+        self.output_field = output_field
+
+    async def __call__(
+        self, records: list[dict[str, Any]], context: StageContext
+    ) -> list[ProcessorResult]:
+        return [
+            ProcessorResult(
+                output={
+                    self.output_field: f"processed_{i}",
+                    "record_external_id": record.get("external_id"),
+                }
+            )
+            for i, record in enumerate(records)
+        ]
 
 
 class MockStorage:
@@ -116,7 +180,9 @@ class MockStorage:
             age_seconds=age_seconds,
         )
 
-    def list_objects_with_metadata(self, prefix: str, suffix: str = "") -> list[ObjectMetadata]:
+    def list_objects_with_metadata(
+        self, prefix: str, suffix: str = ""
+    ) -> list[ObjectMetadata]:
         results = []
         for full_key, data in self._objects.items():
             if self.prefix:
@@ -125,7 +191,9 @@ class MockStorage:
                 key = full_key
             if key.startswith(prefix):
                 if not suffix or key.endswith(suffix):
-                    last_modified = self._created_times.get(full_key, datetime.now(timezone.utc))
+                    last_modified = self._created_times.get(
+                        full_key, datetime.now(timezone.utc)
+                    )
                     now = datetime.now(timezone.utc)
                     age_seconds = int((now - last_modified).total_seconds())
                     results.append(

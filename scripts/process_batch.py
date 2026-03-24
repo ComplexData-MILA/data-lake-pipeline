@@ -6,7 +6,7 @@ from data_lake_pipeline.processing.batch_processor import process_pending_batche
 def main() -> int:
     settings = Settings.from_env()
     summary = process_pending_batches(settings=settings)
-    print(summary.to_json())
+    print(summary.model_dump_json())
     return 0
 
 
