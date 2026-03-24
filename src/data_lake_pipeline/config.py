@@ -80,24 +80,16 @@ class Settings:
 
     @property
     def landing_prefix(self) -> str:
-        return "01_landing"
+        return "landing"
 
     @property
     def pending_prefix(self) -> str:
-        return "02_pending"
-
-    @property
-    def inflight_prefix(self) -> str:
-        return "02_inflight"
-
-    @property
-    def failed_prefix(self) -> str:
-        return "02_failed"
+        return "pending"
 
     @property
     def processed_prefix(self) -> str:
-        return "03_processed"
+        return "processed"
 
     @property
     def archive_prefix(self) -> str:
-        return "04_archive"
+        return "archive"

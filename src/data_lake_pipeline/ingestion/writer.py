@@ -16,7 +16,7 @@ def save_source_posts(
     source_name: str,
     posts: Iterable[SourcePost],
     storage: StorageBackend,
-    landing_prefix: str = "01_landing",
+    landing_prefix: str = "landing",
 ) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     key = f"{landing_prefix}/{source_name}/{today}.jsonl"
@@ -24,7 +24,9 @@ def save_source_posts(
     def _validate_and_convert() -> Iterator[LandedRecord]:
         for post in tqdm(posts, desc="Writing records to landing zone", unit="records"):
             if post.source != source_name:
-                raise ValueError(f"Post source mismatch: expected {source_name}, got {post.source}")
+                raise ValueError(
+                    f"Post source mismatch: expected {source_name}, got {post.source}"
+                )
             yield post.to_landed_record()
 
     written = append_jsonl(storage, key, _validate_and_convert())

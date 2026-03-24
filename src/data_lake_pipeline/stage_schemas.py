@@ -16,7 +16,7 @@ class FilterCompletion(BaseModel):
 
 
 class StageAwareBatchManifest(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=False)
 
     batch_id: str
     source: str

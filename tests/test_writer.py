@@ -1,4 +1,3 @@
-
 from data_lake_pipeline.ingestion.writer import save_source_posts
 from data_lake_pipeline.schemas import SourcePost
 from tests.conftest import MockStorage
@@ -19,10 +18,12 @@ def test_save_source_posts_writes_jsonl():
         )
     ]
 
-    written = save_source_posts("bluesky", posts, storage=storage, landing_prefix="01_landing")
+    written = save_source_posts(
+        "bluesky", posts, storage=storage, landing_prefix="landing"
+    )
     assert written == 1
 
-    files = storage.list_objects("01_landing/bluesky", ".jsonl")
+    files = storage.list_objects("landing/bluesky", ".jsonl")
     assert len(files) == 1
 
     rows = list(storage.stream_jsonl(files[0]))

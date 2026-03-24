@@ -12,7 +12,7 @@ from viewer.backend.dependencies import get_storage, get_batch_state
 router = APIRouter()
 
 PROCESSING_STAGE = "processed"
-LANDING_PREFIX = "01_landing"
+LANDING_PREFIX = "landing"
 MANIFESTS_PREFIX = "manifests"
 
 
