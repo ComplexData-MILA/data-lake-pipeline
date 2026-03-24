@@ -157,6 +157,44 @@ class CheckpointedWriter:
 
         return self.final_key
 
+    async def merge_to_parquet(self) -> str:
+        import io
+
+        import pandas as pd
+
+        if not self._existing_chunks:
+            parquet_key = self.final_key.rsplit(".", 1)[0] + ".parquet"
+            df = pd.DataFrame(columns=["id"])
+            buffer = io.BytesIO()
+            df.to_parquet(buffer, index=False)
+            buffer.seek(0)
+            await self._client.put_object(
+                Bucket=self.bucket,
+                Key=parquet_key,
+                Body=buffer.read(),
+            )
+            return parquet_key
+
+        records = []
+        for chunk_key in self._existing_chunks:
+            async for record in self._stream_chunk(chunk_key):
+                records.append(record)
+
+        df = pd.DataFrame(records)
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False)
+        buffer.seek(0)
+
+        parquet_key = self.final_key.rsplit(".", 1)[0] + ".parquet"
+
+        await self._client.put_object(
+            Bucket=self.bucket,
+            Key=parquet_key,
+            Body=buffer.read(),
+        )
+
+        return parquet_key
+
     async def delete_chunks(self) -> None:
         if self._existing_chunks:
             await self._client.delete_objects(

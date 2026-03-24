@@ -2,7 +2,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from conftest import MockFilter, MockProcessor
+from tests.conftest import MockFilter, MockProcessor
 from data_lake_pipeline.processing.streaming_processor import StreamingStageProcessor
 from data_lake_pipeline.protocols import FilterResult, ProcessorResult, StageContext
 

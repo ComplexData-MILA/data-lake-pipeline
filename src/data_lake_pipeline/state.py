@@ -222,41 +222,36 @@ class StageAwareBatchState:
     def update_checkpoint(
         self,
         manifest: StageAwareBatchManifest,
-        passed_chunks: list[str],
-        rejected_chunks: list[str],
+        chunk_keys: list[str],
         processed_ids_count: int,
     ) -> None:
-        manifest.passed_chunks = passed_chunks
-        manifest.rejected_chunks = rejected_chunks
+        manifest.chunk_keys = chunk_keys
         manifest.processed_ids_count = processed_ids_count
         self.put_manifest(manifest)
         logger.debug(
-            "Checkpoint for batch %s: %d passed chunks, %d rejected chunks, %d processed",
+            "Checkpoint for batch %s: %d chunks, %d processed",
             manifest.batch_id,
-            len(passed_chunks),
-            len(rejected_chunks),
+            len(chunk_keys),
             processed_ids_count,
         )
 
     def complete_batch(
         self,
         manifest: StageAwareBatchManifest,
-        output_key_passed: str,
-        output_key_rejected: str | None,
-        passed_count: int,
-        rejected_count: int,
+        completion: "FilterCompletion",
     ) -> None:
+        from data_lake_pipeline.stage_schemas import FilterCompletion
+
         manifest.state = "completed"
-        manifest.output_key_passed = output_key_passed
-        manifest.output_key_rejected = output_key_rejected
-        manifest.passed_count = passed_count
-        manifest.rejected_count = rejected_count
+        manifest.completed_filters.append(completion)
+        manifest.chunk_keys = []
         self.put_manifest(manifest)
         logger.info(
-            "Completed stage batch %s: %d passed, %d rejected",
+            "Completed stage batch %s: filter %s, %d passed, %d rejected",
             manifest.batch_id,
-            passed_count,
-            rejected_count,
+            completion.filter_name,
+            completion.passed_count,
+            completion.rejected_count,
         )
 
     def fail_batch(self, manifest: StageAwareBatchManifest, error: str) -> None:
@@ -292,16 +287,11 @@ class StageAwareBatchState:
 
     def get_existing_chunks(
         self,
-        output_prefix_base: str,
+        output_prefix: str,
         batch_id: str,
-    ) -> tuple[list[str], list[str]]:
-        passed_prefix = f"{output_prefix_base}/passed/{batch_id}/chunk_"
-        rejected_prefix = f"{output_prefix_base}/rejected/{batch_id}/chunk_"
-
-        passed_chunks = self._list_chunks(passed_prefix)
-        rejected_chunks = self._list_chunks(rejected_prefix)
-
-        return passed_chunks, rejected_chunks
+    ) -> list[str]:
+        chunk_prefix = f"{output_prefix}/.chunks/"
+        return self._list_chunks(chunk_prefix)
 
     def _list_chunks(self, prefix: str) -> list[str]:
         chunks = []

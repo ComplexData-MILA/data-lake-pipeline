@@ -24,6 +24,24 @@ Each filter/processor is a **standalone package** with its own CLI entrypoint. T
 3. Configuration (prompts, thresholds, models) via environment variables
 4. Each filter/processor can have its own cron job or SLURM job
 
+### Output Format
+
+Each filter writes a parquet file at:
+```
+annotations/{batch_id}/filters/{stage_name}.parquet
+```
+
+With columns:
+- `id` - Record identifier (from `external_id` or `id` field)
+- `{stage_name}_passed` - Boolean indicating if record passed the filter
+- `{stage_name}_score` - Optional float score
+- `{stage_name}_reason` - Optional string reason for pass/fail
+
+The merge server combines all filter outputs into:
+```
+annotations/{batch_id}/merged.parquet
+```
+
 ## OpenAI Filters Example (`openai_filters/`)
 
 Example filter/processor implementations using OpenAI SDK. These can be used as templates for creating your own packages.
@@ -65,8 +83,8 @@ def main():
     asyncio.run(run_stage(
         handler=handler,
         stage_name="quality_filter",
-        input_prefix=os.getenv("QUALITY_FILTER_INPUT_PREFIX", "02_pending"),
-        output_prefix_base=os.getenv("QUALITY_FILTER_OUTPUT_PREFIX", "03_quality_filtered"),
+        input_prefix=os.getenv("QUALITY_FILTER_INPUT_PREFIX", "pending"),
+        output_prefix_base=os.getenv("QUALITY_FILTER_OUTPUT_PREFIX", "annotations"),
         settings=settings,
     ))
 
@@ -132,8 +150,8 @@ Each filter/processor uses its own prefixed environment variables:
 | `{NAME}_THRESHOLD` | `QUALITY_FILTER_THRESHOLD=0.7` |
 | `{NAME}_MODEL` | `QUALITY_FILTER_MODEL=gpt-4o-mini` |
 | `{NAME}_PROMPT` | `QUALITY_FILTER_PROMPT=...` |
-| `{NAME}_INPUT_PREFIX` | `QUALITY_FILTER_INPUT_PREFIX=02_pending` |
-| `{NAME}_OUTPUT_PREFIX` | `QUALITY_FILTER_OUTPUT_PREFIX=03_quality_filtered` |
+| `{NAME}_INPUT_PREFIX` | `QUALITY_FILTER_INPUT_PREFIX=pending` |
+| `{NAME}_OUTPUT_PREFIX` | `QUALITY_FILTER_OUTPUT_PREFIX=annotations` |
 
 ## Creating a New Filter/Processor
 
@@ -174,8 +192,8 @@ def main():
     asyncio.run(run_stage(
         handler=handler,
         stage_name="my_filter",
-        input_prefix=os.getenv("MY_FILTER_INPUT_PREFIX", "02_pending"),
-        output_prefix_base=os.getenv("MY_FILTER_OUTPUT_PREFIX", "03_my_filter"),
+        input_prefix=os.getenv("MY_FILTER_INPUT_PREFIX", "pending"),
+        output_prefix_base=os.getenv("MY_FILTER_OUTPUT_PREFIX", "annotations"),
         settings=settings,
     ))
 ```
@@ -205,3 +223,15 @@ async def run_stage(
     min_batch_age_seconds: int = 0,         # Min file age before processing
 ) -> bool:                                  # True if batch processed
 ```
+
+## Checkpointing & Fault Tolerance
+
+The `run_stage()` function supports automatic recovery from failures:
+
+1. **Chunk-based checkpointing**: Records are written to intermediate JSONL chunks in S3
+2. **Recovery on restart**: Existing chunks are loaded, processed IDs are tracked
+3. **Skip processed records**: Already-processed records are skipped on resume
+4. **Atomic parquet output**: On successful completion, chunks are merged into a single parquet file
+
+Chunk location: `annotations/{batch_id}/filters/.chunks/{stage_name}_NNNN.jsonl`
+Final output: `annotations/{batch_id}/filters/{stage_name}.parquet`

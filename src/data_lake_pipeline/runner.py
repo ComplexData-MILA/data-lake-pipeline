@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from data_lake_pipeline.config import Settings
 from data_lake_pipeline.io_async import CheckpointedWriter, stream_jsonl_async
 from data_lake_pipeline.protocols import AsyncFilter, AsyncProcessor, StageContext
-from data_lake_pipeline.stage_schemas import StageAwareBatchManifest
+from data_lake_pipeline.stage_schemas import FilterCompletion, StageAwareBatchManifest
 from data_lake_pipeline.state import StageAwareBatchState
 from data_lake_pipeline.storage.s3 import S3Storage
 
@@ -37,18 +38,18 @@ async def run_stage(
     1. Optionally discovers/creates pending batches from input_prefix
     2. Claims a batch (specific or any pending)
     3. Processes records through the handler
-    4. Writes results with checkpointing
+    4. Writes results as parquet with checkpointing
 
     Args:
         handler: AsyncFilter or AsyncProcessor instance
         stage_name: Unique name for this stage (used for manifest namespacing)
         input_prefix: S3 prefix to read input JSONL files from
-        output_prefix_base: S3 prefix base for output (passed/ rejected/ subdirs)
+        output_prefix_base: S3 prefix base for output (annotations/{batch_id}/filters/{stage_name}.parquet)
         settings: Pipeline settings
         batch_id: Specific batch ID to process, or None to claim any pending
         max_concurrent: Max concurrent async operations
         checkpoint_interval: Records per checkpoint chunk
-        is_filter: True for filters (pass/reject), False for processors (all pass)
+        is_filter: True for filters (track pass/fail), False for processors (all pass)
         create_batches: If True, scan input_prefix and create manifests for new files
         min_batch_age_seconds: Minimum age in seconds for a file to be considered stable
 
@@ -152,47 +153,36 @@ async def _process_batch(
         batch_id=manifest.batch_id,
     )
 
-    chunk_base = f"{settings.s3_prefix}/{output_prefix_base}".strip("/")
+    output_prefix = f"{output_prefix_base}/{manifest.batch_id}/filters"
+    chunk_prefix = f"{settings.s3_prefix}/{output_prefix}/.chunks/{stage_name}_"
+    final_key = f"{settings.s3_prefix}/{output_prefix}/{stage_name}.jsonl"
 
-    passed_writer = CheckpointedWriter(
+    writer = CheckpointedWriter(
         bucket=settings.s3_bucket,
-        chunk_prefix=f"{chunk_base}/passed/{manifest.batch_id}/chunk_",
-        final_key=f"{chunk_base}/passed/{manifest.batch_id}.jsonl",
+        chunk_prefix=chunk_prefix,
+        final_key=final_key,
         chunk_size=checkpoint_interval,
         endpoint_url=settings.s3_endpoint_url,
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
     )
-    rejected_writer = CheckpointedWriter(
-        bucket=settings.s3_bucket,
-        chunk_prefix=f"{chunk_base}/rejected/{manifest.batch_id}/chunk_",
-        final_key=f"{chunk_base}/rejected/{manifest.batch_id}.jsonl",
-        chunk_size=checkpoint_interval,
-        endpoint_url=settings.s3_endpoint_url,
-        access_key=settings.s3_access_key,
-        secret_key=settings.s3_secret_key,
-    )
+
+    passed_count = 0
+    rejected_count = 0
 
     try:
-        async with passed_writer, rejected_writer:
-            existing_passed, existing_rejected = state.get_existing_chunks(
-                output_prefix_base,
-                manifest.batch_id,
+        async with writer:
+            existing_chunks = state.get_existing_chunks(
+                output_prefix, manifest.batch_id
             )
 
-            if existing_passed or existing_rejected:
-                logger.info(
-                    "Recovering: %d passed chunks, %d rejected chunks",
-                    len(existing_passed),
-                    len(existing_rejected),
-                )
-                await passed_writer.load_existing_chunks(existing_passed)
-                await rejected_writer.load_existing_chunks(existing_rejected)
+            if existing_chunks:
+                logger.info("Recovering: %d existing chunks", len(existing_chunks))
+                await writer.load_existing_chunks(existing_chunks)
 
-            processed_ids = passed_writer.processed_ids | rejected_writer.processed_ids
+            processed_ids = writer.processed_ids
 
             input_key = manifest.original_key
-            record_idx = 0
             checkpoint_counter = 0
 
             async for record, result in processor.process_stream(
@@ -205,71 +195,60 @@ async def _process_batch(
                 ),
                 context,
             ):
-                external_id = record.get("external_id")
+                external_id = record.get("external_id") or record.get("id")
                 if external_id and external_id in processed_ids:
-                    record_idx += 1
                     continue
 
                 passed = getattr(result, "passed", True)
+
+                if is_filter:
+                    if passed:
+                        passed_count += 1
+                    else:
+                        rejected_count += 1
+
                 enriched = {
-                    **record,
-                    "stage_outputs": {
-                        **record.get("stage_outputs", {}),
-                        stage_name: {
-                            "passed": passed,
-                            "output": result.output,
-                        },
-                    },
+                    "id": external_id,
+                    f"{stage_name}_passed": passed,
+                    f"{stage_name}_score": getattr(result, "score", None),
+                    f"{stage_name}_reason": getattr(result, "reason", None),
                 }
 
-                if is_filter and not passed:
-                    await rejected_writer.write_record(enriched)
-                else:
-                    await passed_writer.write_record(enriched)
+                await writer.write_record(enriched)
 
-                record_idx += 1
                 checkpoint_counter += 1
 
                 if checkpoint_counter >= checkpoint_interval * 5:
                     state.update_checkpoint(
                         manifest,
-                        passed_chunks=passed_writer.existing_chunks,
-                        rejected_chunks=rejected_writer.existing_chunks,
+                        chunk_keys=writer.existing_chunks,
                         processed_ids_count=len(processed_ids),
                     )
                     checkpoint_counter = 0
 
-        passed_summary, rejected_summary = await asyncio.gather(
-            passed_writer.close(),
-            rejected_writer.close(),
+        await writer.close()
+
+        parquet_key = await writer.merge_to_parquet()
+
+        await writer.delete_chunks()
+
+        completion = FilterCompletion(
+            filter_name=stage_name,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            output_key=parquet_key.replace(f"{settings.s3_prefix}/", ""),
+            passed_count=passed_count,
+            rejected_count=rejected_count,
         )
 
-        merged_passed, merged_rejected = await asyncio.gather(
-            passed_writer.merge_chunks(),
-            rejected_writer.merge_chunks(),
-        )
-
-        await asyncio.gather(
-            passed_writer.delete_chunks(),
-            rejected_writer.delete_chunks(),
-        )
-
-        state.complete_batch(
-            manifest,
-            output_key_passed=merged_passed,
-            output_key_rejected=merged_rejected
-            if rejected_summary.record_count > 0
-            else None,
-            passed_count=passed_summary.record_count,
-            rejected_count=rejected_summary.record_count,
-        )
+        state.complete_batch(manifest, completion)
 
         logger.info(
-            "Completed stage %s batch %s: %d passed, %d rejected",
+            "Completed stage %s batch %s: %d passed, %d rejected -> %s",
             stage_name,
             manifest.batch_id,
-            passed_summary.record_count,
-            rejected_summary.record_count,
+            passed_count,
+            rejected_count,
+            parquet_key,
         )
 
     except Exception as e:
