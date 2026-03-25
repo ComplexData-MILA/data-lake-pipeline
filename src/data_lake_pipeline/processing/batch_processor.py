@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -18,16 +19,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _claim_pending_batch(state: BatchState) -> BatchManifest | None:
-    pending = state.list_pending()
+async def _claim_pending_batch(state: BatchState) -> BatchManifest | None:
+    pending = await state.list_pending()
     for manifest in pending:
-        claimed = state.claim_batch(manifest.batch_id)
+        claimed = await state.claim_batch(manifest.batch_id)
         if claimed:
             return claimed
     return None
 
 
-def process_pending_batches(settings: Settings) -> ProcessingSummary:
+async def process_pending_batches(settings: Settings) -> ProcessingSummary:
     configure_logging(settings.log_level)
     storage = S3Storage(
         settings.s3_bucket,
@@ -36,9 +37,9 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
     )
-    state = BatchState(storage)
+    state = BatchState(storage, mutex_ws_url=settings.mutex_ws_url)
 
-    manifest = _claim_pending_batch(state)
+    manifest = await _claim_pending_batch(state)
 
     if not manifest:
         return ProcessingSummary(
@@ -70,7 +71,7 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
             )
 
         if not requests:
-            state.fail_batch(manifest, "No records found in batch")
+            await state.fail_batch(manifest, "No records found in batch")
             return ProcessingSummary(
                 claimed_files=[claimed_batch_id],
                 archived_files=[],
@@ -109,7 +110,7 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
         storage.copy_object(data_key, archive_key)
         storage.delete_object(data_key)
 
-        state.complete_batch(manifest, output_key, len(results))
+        await state.complete_batch(manifest, output_key, len(results))
 
         return ProcessingSummary(
             claimed_files=[claimed_batch_id],
@@ -121,7 +122,7 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
 
     except Exception as e:
         logger.exception("Batch processing failed for %s", claimed_batch_id)
-        state.fail_batch(manifest, str(e))
+        await state.fail_batch(manifest, str(e))
 
         return ProcessingSummary(
             claimed_files=[claimed_batch_id],
@@ -130,3 +131,7 @@ def process_pending_batches(settings: Settings) -> ProcessingSummary:
             output_file=None,
             processed_records=0,
         )
+
+
+def run_process_pending_batches(settings: Settings) -> ProcessingSummary:
+    return asyncio.run(process_pending_batches(settings))

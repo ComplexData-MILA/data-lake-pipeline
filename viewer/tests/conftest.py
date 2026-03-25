@@ -188,30 +188,34 @@ class MockBatchManifest:
             "locked_by": self.locked_by,
             "error": self.error,
         }
+    
+    def model_dump(self, mode: str = "json"):
+        return self.to_dict()
 
 
 class MockBatchState:
-    def __init__(self, storage: MockStorage):
+    def __init__(self, storage: MockStorage, mutex_ws_url: str = "wss://test.example.com"):
         self.storage = storage
+        self.mutex_ws_url = mutex_ws_url
         self._manifests: dict[str, MockBatchManifest] = {}
 
     def add_manifest(self, manifest: MockBatchManifest):
         self._manifests[manifest.batch_id] = manifest
         self.storage.put_json(f"manifests/{manifest.batch_id}.json", manifest.to_dict())
 
-    def get_manifest(self, batch_id: str) -> MockBatchManifest | None:
+    async def get_manifest(self, batch_id: str) -> MockBatchManifest | None:
         return self._manifests.get(batch_id)
 
-    def list_pending(self) -> list[MockBatchManifest]:
+    async def list_pending(self) -> list[MockBatchManifest]:
         return [m for m in self._manifests.values() if m.state == "pending"]
 
-    def list_inflight(self) -> list[MockBatchManifest]:
+    async def list_inflight(self) -> list[MockBatchManifest]:
         return [m for m in self._manifests.values() if m.state == "inflight"]
 
-    def list_failed(self) -> list[MockBatchManifest]:
+    async def list_failed(self) -> list[MockBatchManifest]:
         return [m for m in self._manifests.values() if m.state == "failed"]
 
-    def list_all(self) -> list[MockBatchManifest]:
+    async def list_all(self) -> list[MockBatchManifest]:
         return list(self._manifests.values())
 
 
@@ -228,16 +232,41 @@ def mock_batch_state(mock_storage: MockStorage):
 @pytest.fixture
 def test_client(mock_storage: MockStorage, mock_batch_state: MockBatchState):
     from viewer.backend.main import app
-    from viewer.backend.dependencies import get_storage, get_batch_state
+    from viewer.backend.dependencies import get_storage, get_batch_state, get_settings
 
     def override_get_storage():
         return mock_storage
 
     def override_get_batch_state():
         return mock_batch_state
+    
+    def override_get_settings():
+        from data_lake_pipeline.config import Settings
+        return Settings(
+            s3_bucket="test-bucket",
+            s3_prefix="test-prefix",
+            s3_endpoint_url=None,
+            s3_access_key=None,
+            s3_secret_key=None,
+            log_level="INFO",
+            stable_file_age_minutes=30,
+            filter_lock_timeout_seconds=600,
+            annotator_backend="mock",
+            model_name="mock-model",
+            prompt_template="test",
+            vllm_tensor_parallel_size=1,
+            vllm_temperature=0.1,
+            vllm_max_tokens=256,
+            use_example_source_data=False,
+            slurm_enabled=False,
+            slurm_command="sbatch",
+            slurm_script="slurm_job.sh",
+            mutex_ws_url="wss://test.example.com",
+        )
 
     app.dependency_overrides[get_storage] = override_get_storage
     app.dependency_overrides[get_batch_state] = override_get_batch_state
+    app.dependency_overrides[get_settings] = override_get_settings
 
     client = TestClient(app)
     yield client

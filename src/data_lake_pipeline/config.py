@@ -38,6 +38,7 @@ class Settings:
     slurm_enabled: bool
     slurm_command: str
     slurm_script: str
+    mutex_ws_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -47,6 +48,9 @@ class Settings:
             raise ValueError(
                 "PIPELINE_S3_URL must be set (e.g., s3://my-bucket/data-project/)"
             )
+        mutex_ws_url = os.getenv("PIPELINE_MUTEX_WS_URL")
+        if not mutex_ws_url:
+            raise ValueError("PIPELINE_MUTEX_WS_URL must be set for distributed locking")
         bucket, prefix = parse_s3_url(s3_url)
         return cls(
             s3_bucket=bucket,
@@ -80,6 +84,7 @@ class Settings:
             == "true",
             slurm_command=os.getenv("PIPELINE_SLURM_COMMAND", "sbatch"),
             slurm_script=os.getenv("PIPELINE_SLURM_SCRIPT", "slurm/slurm_job.sh"),
+            mutex_ws_url=mutex_ws_url,
         )
 
     @property

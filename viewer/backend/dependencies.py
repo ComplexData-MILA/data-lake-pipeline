@@ -4,8 +4,13 @@ import os
 
 from fastapi import Depends
 
+from data_lake_pipeline.config import Settings
 from data_lake_pipeline.storage import S3Storage, StorageBackend
 from data_lake_pipeline.state import BatchState
+
+
+def get_settings() -> Settings:
+    return Settings.from_env()
 
 
 def get_storage() -> StorageBackend:
@@ -33,5 +38,8 @@ def get_storage() -> StorageBackend:
     )
 
 
-def get_batch_state(storage: StorageBackend = Depends(get_storage)) -> BatchState:
-    return BatchState(storage)
+def get_batch_state(
+    storage: StorageBackend = Depends(get_storage),
+    settings: Settings = Depends(get_settings),
+) -> BatchState:
+    return BatchState(storage, mutex_ws_url=settings.mutex_ws_url)

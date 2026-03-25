@@ -74,8 +74,8 @@ class PipelineStatusService:
             force_refresh=force_refresh,
         )
 
-    def _fetch_pipeline_status(self) -> PipelineStatus:
-        manifests = self._fetch_all_manifests()
+    async def _fetch_pipeline_status(self) -> PipelineStatus:
+        manifests = await self._fetch_all_manifests()
         now = datetime.now(timezone.utc)
 
         batches: dict[str, int] = {}
@@ -172,12 +172,12 @@ class PipelineStatusService:
             cache_fetched_at=now.isoformat(),
         )
 
-    def _fetch_queue_status(self) -> QueueStatus:
+    async def _fetch_queue_status(self) -> QueueStatus:
         now = datetime.now(timezone.utc)
 
-        pending_manifests = self.batch_state.list_pending()
-        inflight_manifests = self.batch_state.list_inflight()
-        failed_manifests = self.batch_state.list_failed()
+        pending_manifests = await self.batch_state.list_pending()
+        inflight_manifests = await self.batch_state.list_inflight()
+        failed_manifests = await self.batch_state.list_failed()
 
         pending = [
             {
@@ -215,11 +215,11 @@ class PipelineStatusService:
             cache_fetched_at=now.isoformat(),
         )
 
-    def _fetch_all_manifests(self) -> list[dict]:
+    async def _fetch_all_manifests(self) -> list[dict]:
         manifests = []
         for key in self.storage.list_objects("manifests", ".json"):
             batch_id = key.split("/")[-1].replace(".json", "")
-            manifest = self.batch_state.get_manifest(batch_id)
+            manifest = await self.batch_state.get_manifest(batch_id)
             if manifest:
                 manifests.append(manifest.model_dump(mode="json"))
         return manifests

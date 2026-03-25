@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 
@@ -28,7 +29,7 @@ def _extract_source_from_key(key: str, landing_prefix: str) -> str:
     return parts[0] if parts else "unknown"
 
 
-def promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> list[str]:
+async def promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> list[str]:
     configure_logging(settings.log_level)
     storage = S3Storage(
         settings.s3_bucket,
@@ -37,7 +38,7 @@ def promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> li
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
     )
-    state = BatchState(storage)
+    state = BatchState(storage, mutex_ws_url=settings.mutex_ws_url)
     promoted: list[str] = []
 
     landing_prefix = settings.landing_prefix
@@ -47,7 +48,7 @@ def promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> li
 
         source_name = _extract_source_from_key(key, landing_prefix)
         try:
-            manifest = state.create_batch(source_name, key)
+            manifest = await state.create_batch(source_name, key)
             storage.copy_object(key, f"{settings.pending_prefix}/{manifest.batch_id}.jsonl")
             storage.delete_object(key)
             promoted.append(manifest.batch_id)
@@ -58,7 +59,7 @@ def promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> li
     return promoted
 
 
-def submit_slurm_if_needed(settings: Settings) -> None:
+async def submit_slurm_if_needed(settings: Settings) -> None:
     configure_logging(settings.log_level)
     storage = S3Storage(
         settings.s3_bucket,
@@ -67,9 +68,9 @@ def submit_slurm_if_needed(settings: Settings) -> None:
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
     )
-    state = BatchState(storage)
+    state = BatchState(storage, mutex_ws_url=settings.mutex_ws_url)
 
-    pending = state.list_pending()
+    pending = await state.list_pending()
 
     if not pending:
         logger.info("No pending queue items. Not submitting SLURM.")
@@ -86,3 +87,11 @@ def submit_slurm_if_needed(settings: Settings) -> None:
     cmd = [settings.slurm_command, settings.slurm_script]
     logger.info("Submitting SLURM job: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
+
+
+def run_promote_stable_landing_files(settings: Settings, min_age_minutes: int) -> list[str]:
+    return asyncio.run(promote_stable_landing_files(settings, min_age_minutes))
+
+
+def run_submit_slurm_if_needed(settings: Settings) -> None:
+    asyncio.run(submit_slurm_if_needed(settings))

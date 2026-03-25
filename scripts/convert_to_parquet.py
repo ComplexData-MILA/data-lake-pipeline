@@ -65,9 +65,9 @@ async def convert_stage_jsonl_to_parquet(
         secret_key=settings.s3_secret_key,
     )
 
-    state = StageAwareBatchState(storage, stage_name)
+    state = StageAwareBatchState(storage, stage_name, mutex_ws_url=settings.mutex_ws_url)
 
-    for manifest in state.list_all():
+    for manifest in await state.list_all():
         if manifest.state != "completed":
             continue
 

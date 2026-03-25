@@ -65,7 +65,9 @@ async def run_stage(
     )
 
     state = StageAwareBatchState(
-        storage, stage_name, lock_timeout_seconds=settings.filter_lock_timeout_seconds
+        storage, stage_name,
+        mutex_ws_url=settings.mutex_ws_url,
+        lock_timeout_seconds=settings.filter_lock_timeout_seconds,
     )
 
     if create_batches:
@@ -73,7 +75,7 @@ async def run_stage(
             state, storage, input_prefix, settings, min_batch_age_seconds
         )
 
-    manifest = _claim_batch_for_filter(state, stage_name, batch_id)
+    manifest = await _claim_batch_for_filter(state, stage_name, batch_id)
     if not manifest:
         logger.info("No available batches for filter %s", stage_name)
         return False
@@ -93,15 +95,15 @@ async def run_stage(
     return True
 
 
-def _claim_batch_for_filter(
+async def _claim_batch_for_filter(
     state: StageAwareBatchState, filter_name: str, batch_id: str | None = None
 ) -> StageAwareBatchManifest | None:
     if batch_id:
-        return state.claim_filter(batch_id, filter_name)
+        return await state.claim_filter(batch_id, filter_name)
 
-    available = state.list_available_for_filter(filter_name)
+    available = await state.list_available_for_filter(filter_name)
     for manifest in available:
-        claimed = state.claim_filter(manifest.batch_id, filter_name)
+        claimed = await state.claim_filter(manifest.batch_id, filter_name)
         if claimed:
             return claimed
     return None
@@ -115,7 +117,7 @@ async def _ensure_pending_batches(
     min_age_seconds: int,
 ) -> None:
     """Scan input prefix and create manifests for unprocessed files."""
-    existing_manifests = {m.original_key for m in state.list_all()}
+    existing_manifests = {m.original_key for m in await state.list_all()}
 
     for key in storage.list_objects(input_prefix, ".jsonl"):
         if key in existing_manifests:
@@ -134,7 +136,7 @@ async def _ensure_pending_batches(
 
         source = key.split("/")[-1].replace(".jsonl", "")
         try:
-            state.create_batch(
+            await state.create_batch(
                 source=source,
                 original_key=key,
             )
@@ -239,7 +241,7 @@ async def _process_batch(
                 checkpoint_counter += 1
 
                 if checkpoint_counter >= checkpoint_interval * 5:
-                    state.update_checkpoint(
+                    await state.update_checkpoint(
                         manifest,
                         filter_name=stage_name,
                         chunk_keys=writer.existing_chunks,
@@ -260,7 +262,7 @@ async def _process_batch(
             rejected_count=rejected_count,
         )
 
-        state.complete_filter(manifest, stage_name, completion)
+        await state.complete_filter(manifest, stage_name, completion)
 
         logger.info(
             "Completed stage %s batch %s: %d passed, %d rejected -> %s",
@@ -273,5 +275,5 @@ async def _process_batch(
 
     except Exception as e:
         logger.exception("Failed to process batch %s: %s", manifest.batch_id, e)
-        state.fail_filter(manifest, stage_name, str(e))
+        await state.fail_filter(manifest, stage_name, str(e))
         raise

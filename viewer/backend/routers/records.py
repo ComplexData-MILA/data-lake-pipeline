@@ -125,7 +125,7 @@ async def query_queue_records(
 ) -> RecordResponse:
     all_records = []
 
-    for manifest in batch_state.list_all():
+    for manifest in await batch_state.list_all():
         record = manifest.model_dump(mode="json")
         all_records.append(record)
 

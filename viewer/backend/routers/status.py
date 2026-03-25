@@ -44,11 +44,12 @@ async def get_sources(
     storage: StorageBackend = Depends(get_storage),
     batch_state: BatchState = Depends(get_batch_state),
 ):
+    manifests = await batch_state.list_all()
     sources = {
         parts[1]
         for key in storage.list_objects("01_landing")
         if len(parts := key.split("/")) > 1
-    } | {manifest.source for manifest in batch_state.list_all() if manifest.source}
+    } | {manifest.source for manifest in manifests if manifest.source}
     return sorted(sources)
 
 
