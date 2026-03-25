@@ -182,7 +182,11 @@ async def _process_batch(
 
             processed_ids = writer.processed_ids
 
-            input_key = manifest.original_key
+            input_key = (
+                f"{settings.s3_prefix}/{manifest.original_key}"
+                if settings.s3_prefix
+                else manifest.original_key
+            )
             checkpoint_counter = 0
 
             async for record, result in processor.process_stream(
