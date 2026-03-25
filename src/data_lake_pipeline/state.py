@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from data_lake_pipeline.schemas import BatchManifest
-from data_lake_pipeline.stage_schemas import StageAwareBatchManifest
+from data_lake_pipeline.stage_schemas import (
+    FilterCompletion,
+    FilterError,
+    FilterState,
+    StageAwareBatchManifest,
+)
 
 if TYPE_CHECKING:
     from data_lake_pipeline.storage.base import StorageBackend
@@ -16,6 +21,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MANIFESTS_PREFIX = "manifests"
+
+DEFAULT_LOCK_TIMEOUT_SECONDS = 600
 
 
 class BatchState:
@@ -138,9 +145,12 @@ class BatchState:
 
 
 class StageAwareBatchState:
-    def __init__(self, storage: StorageBackend, stage_name: str):
+    def __init__(
+        self, storage: StorageBackend, stage_name: str, lock_timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS
+    ):
         self.storage = storage
         self.stage_name = stage_name
+        self.lock_timeout_seconds = lock_timeout_seconds
 
     def _manifest_key(self, batch_id: str) -> str:
         return f"{MANIFESTS_PREFIX}/stages/{self.stage_name}/{batch_id}.json"
@@ -168,111 +178,127 @@ class StageAwareBatchState:
         source: str,
         original_key: str,
         parent_batch_id: str | None = None,
-        checkpoint_interval: int = 1000,
     ) -> StageAwareBatchManifest:
         batch_id = f"{self.stage_name}__{uuid.uuid4().hex[:8]}"
         manifest = StageAwareBatchManifest(
             batch_id=batch_id,
             source=source,
             original_key=original_key,
-            state="pending",
             pipeline_stage=self.stage_name,
             parent_batch_id=parent_batch_id,
             created_at=datetime.now(timezone.utc).isoformat(),
-            checkpoint_interval=checkpoint_interval,
         )
         if not self.put_manifest(manifest, if_none_match=True):
             raise RuntimeError(f"Failed to create manifest for batch {batch_id}")
         logger.info("Created stage batch %s for %s", batch_id, original_key)
         return manifest
 
-    def claim_batch(
-        self, batch_id: str | None = None
-    ) -> StageAwareBatchManifest | None:
-        if batch_id:
-            manifest = self.get_manifest(batch_id)
-            if not manifest or manifest.state != "pending":
-                return None
-        else:
-            manifest = self.claim_pending_batch()
-            if not manifest:
-                return None
-            return manifest
-
-        manifest.state = "inflight"
-        manifest.locked_by = self._worker_id()
-        manifest.locked_at = datetime.now(timezone.utc).isoformat()
-
-        original = self.get_manifest(batch_id)
-        if original and original.state != "pending":
+    def claim_filter(self, batch_id: str, filter_name: str) -> StageAwareBatchManifest | None:
+        manifest = self.get_manifest(batch_id)
+        if not manifest:
             return None
 
-        if self.put_manifest(manifest):
-            logger.info("Claimed stage batch %s", batch_id)
-            return manifest
-        return None
+        if manifest.is_filter_complete(filter_name):
+            return None
 
-    def claim_pending_batch(self) -> StageAwareBatchManifest | None:
-        for manifest in self.list_pending():
-            claimed = self.claim_batch(manifest.batch_id)
-            if claimed:
-                return claimed
+        if manifest.is_filter_locked(filter_name, self.lock_timeout_seconds):
+            return None
+
+        old_state = manifest.filter_states.get(filter_name)
+        old_chunks = old_state.chunk_keys if old_state else []
+        old_count = old_state.processed_ids_count if old_state else 0
+
+        manifest.filter_states[filter_name] = FilterState(
+            locked_by=self._worker_id(),
+            locked_at=datetime.now(timezone.utc).isoformat(),
+            chunk_keys=old_chunks,
+            processed_ids_count=old_count,
+        )
+
+        if self.put_manifest(manifest):
+            logger.info("Claimed filter %s on batch %s", filter_name, batch_id)
+            return manifest
         return None
 
     def update_checkpoint(
         self,
         manifest: StageAwareBatchManifest,
+        filter_name: str,
         chunk_keys: list[str],
         processed_ids_count: int,
     ) -> None:
-        manifest.chunk_keys = chunk_keys
-        manifest.processed_ids_count = processed_ids_count
-        self.put_manifest(manifest)
-        logger.debug(
-            "Checkpoint for batch %s: %d chunks, %d processed",
-            manifest.batch_id,
-            len(chunk_keys),
-            processed_ids_count,
-        )
+        state = manifest.filter_states.get(filter_name)
+        if state:
+            state.chunk_keys = chunk_keys
+            state.processed_ids_count = processed_ids_count
+            state.locked_at = datetime.now(timezone.utc).isoformat()
+            self.put_manifest(manifest)
+            logger.debug(
+                "Checkpoint for filter %s on batch %s: %d chunks, %d processed",
+                filter_name,
+                manifest.batch_id,
+                len(chunk_keys),
+                processed_ids_count,
+            )
 
-    def complete_batch(
+    def complete_filter(
         self,
         manifest: StageAwareBatchManifest,
-        completion: "FilterCompletion",
+        filter_name: str,
+        completion: FilterCompletion,
     ) -> None:
-        from data_lake_pipeline.stage_schemas import FilterCompletion
-
-        manifest.state = "completed"
-        manifest.completed_filters.append(completion)
-        manifest.chunk_keys = []
+        if filter_name in manifest.filter_states:
+            del manifest.filter_states[filter_name]
+        manifest.completed_filters[filter_name] = completion
         self.put_manifest(manifest)
         logger.info(
-            "Completed stage batch %s: filter %s, %d passed, %d rejected",
+            "Completed filter %s on batch %s: %d passed, %d rejected",
+            filter_name,
             manifest.batch_id,
-            completion.filter_name,
             completion.passed_count,
             completion.rejected_count,
         )
 
-    def fail_batch(self, manifest: StageAwareBatchManifest, error: str) -> None:
-        manifest.state = "failed"
-        manifest.error = error
-        self.put_manifest(manifest)
-        logger.error("Failed stage batch %s: %s", manifest.batch_id, error)
+    def fail_filter(
+        self,
+        manifest: StageAwareBatchManifest,
+        filter_name: str,
+        error: str,
+        attempt: int = 1,
+    ) -> None:
+        filter_error = FilterError(
+            error=error,
+            failed_at=datetime.now(timezone.utc).isoformat(),
+            attempt=attempt,
+        )
+        if filter_name not in manifest.filter_errors:
+            manifest.filter_errors[filter_name] = []
+        manifest.filter_errors[filter_name].append(filter_error)
 
-    def list_pending(self, min_age_seconds: int = 0) -> list[StageAwareBatchManifest]:
+        if filter_name in manifest.filter_states:
+            del manifest.filter_states[filter_name]
+
+        self.put_manifest(manifest)
+        logger.error("Failed filter %s on batch %s: %s", filter_name, manifest.batch_id, error)
+
+    def list_available_for_filter(self, filter_name: str, min_age_seconds: int = 0) -> list[StageAwareBatchManifest]:
         manifests = []
         prefix = f"{MANIFESTS_PREFIX}/stages/{self.stage_name}"
         for key in self.storage.list_objects(prefix, ".json"):
             batch_id = key.split("/")[-1].replace(".json", "")
             manifest = self.get_manifest(batch_id)
-            if manifest and manifest.state == "pending":
-                try:
-                    age = self.storage.get_object_age_seconds(key)
-                    if age >= min_age_seconds:
-                        manifests.append(manifest)
-                except Exception:
+            if not manifest:
+                continue
+            if manifest.is_filter_complete(filter_name):
+                continue
+            if manifest.is_filter_locked(filter_name, self.lock_timeout_seconds):
+                continue
+            try:
+                age = self.storage.get_object_age_seconds(key)
+                if age >= min_age_seconds:
                     manifests.append(manifest)
+            except Exception:
+                manifests.append(manifest)
         return manifests
 
     def list_all(self) -> list[StageAwareBatchManifest]:
@@ -289,8 +315,9 @@ class StageAwareBatchState:
         self,
         output_prefix: str,
         batch_id: str,
+        filter_name: str,
     ) -> list[str]:
-        chunk_prefix = f"{output_prefix}/.chunks/"
+        chunk_prefix = f"{output_prefix}/.chunks/{filter_name}_"
         return self._list_chunks(chunk_prefix)
 
     def _list_chunks(self, prefix: str) -> list[str]:

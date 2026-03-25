@@ -36,17 +36,17 @@ async def run_stage(
     Run a filter or processor stage.
 
     1. Optionally discovers/creates pending batches from input_prefix
-    2. Claims a batch (specific or any pending)
+    2. Claims a batch for a specific filter
     3. Processes records through the handler
     4. Writes results as parquet with checkpointing
 
     Args:
         handler: AsyncFilter or AsyncProcessor instance
-        stage_name: Unique name for this stage (used for manifest namespacing)
+        stage_name: Unique name for this stage (used for manifest namespacing and filter_name)
         input_prefix: S3 prefix to read input JSONL files from
         output_prefix_base: S3 prefix base for output (annotations/{batch_id}/filters/{stage_name}.parquet)
         settings: Pipeline settings
-        batch_id: Specific batch ID to process, or None to claim any pending
+        batch_id: Specific batch ID to process, or None to claim any available
         max_concurrent: Max concurrent async operations
         checkpoint_interval: Records per checkpoint chunk
         is_filter: True for filters (track pass/fail), False for processors (all pass)
@@ -54,7 +54,7 @@ async def run_stage(
         min_batch_age_seconds: Minimum age in seconds for a file to be considered stable
 
     Returns:
-        True if a batch was processed, False if no pending batches.
+        True if a batch was processed, False if no available batches.
     """
     storage = S3Storage(
         bucket=settings.s3_bucket,
@@ -64,16 +64,18 @@ async def run_stage(
         secret_key=settings.s3_secret_key,
     )
 
-    state = StageAwareBatchState(storage, stage_name)
+    state = StageAwareBatchState(
+        storage, stage_name, lock_timeout_seconds=settings.filter_lock_timeout_seconds
+    )
 
     if create_batches:
         await _ensure_pending_batches(
             state, storage, input_prefix, settings, min_batch_age_seconds
         )
 
-    manifest = state.claim_batch(batch_id)
+    manifest = _claim_batch_for_filter(state, stage_name, batch_id)
     if not manifest:
-        logger.info("No pending batches for stage %s", stage_name)
+        logger.info("No available batches for filter %s", stage_name)
         return False
 
     await _process_batch(
@@ -89,6 +91,20 @@ async def run_stage(
     )
 
     return True
+
+
+def _claim_batch_for_filter(
+    state: StageAwareBatchState, filter_name: str, batch_id: str | None = None
+) -> StageAwareBatchManifest | None:
+    if batch_id:
+        return state.claim_filter(batch_id, filter_name)
+
+    available = state.list_available_for_filter(filter_name)
+    for manifest in available:
+        claimed = state.claim_filter(manifest.batch_id, filter_name)
+        if claimed:
+            return claimed
+    return None
 
 
 async def _ensure_pending_batches(
@@ -173,7 +189,7 @@ async def _process_batch(
     try:
         async with writer:
             existing_chunks = state.get_existing_chunks(
-                output_prefix, manifest.batch_id
+                output_prefix, manifest.batch_id, stage_name
             )
 
             if existing_chunks:
@@ -225,6 +241,7 @@ async def _process_batch(
                 if checkpoint_counter >= checkpoint_interval * 5:
                     state.update_checkpoint(
                         manifest,
+                        filter_name=stage_name,
                         chunk_keys=writer.existing_chunks,
                         processed_ids_count=len(processed_ids),
                     )
@@ -237,14 +254,13 @@ async def _process_batch(
         await writer.delete_chunks()
 
         completion = FilterCompletion(
-            filter_name=stage_name,
             completed_at=datetime.now(timezone.utc).isoformat(),
             output_key=parquet_key.replace(f"{settings.s3_prefix}/", ""),
             passed_count=passed_count,
             rejected_count=rejected_count,
         )
 
-        state.complete_batch(manifest, completion)
+        state.complete_filter(manifest, stage_name, completion)
 
         logger.info(
             "Completed stage %s batch %s: %d passed, %d rejected -> %s",
@@ -257,5 +273,5 @@ async def _process_batch(
 
     except Exception as e:
         logger.exception("Failed to process batch %s: %s", manifest.batch_id, e)
-        state.fail_batch(manifest, str(e))
+        state.fail_filter(manifest, stage_name, str(e))
         raise

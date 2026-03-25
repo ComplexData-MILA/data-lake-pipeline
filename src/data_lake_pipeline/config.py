@@ -27,6 +27,7 @@ class Settings:
     s3_secret_key: str | None
     log_level: str
     stable_file_age_minutes: int
+    filter_lock_timeout_seconds: int
     annotator_backend: str
     model_name: str
     prompt_template: str
@@ -56,6 +57,9 @@ class Settings:
             log_level=os.getenv("PIPELINE_LOG_LEVEL", "INFO"),
             stable_file_age_minutes=int(
                 os.getenv("PIPELINE_STABLE_FILE_AGE_MINUTES", "30")
+            ),
+            filter_lock_timeout_seconds=int(
+                os.getenv("PIPELINE_FILTER_LOCK_TIMEOUT_SECONDS", "600")
             ),
             annotator_backend=os.getenv("PIPELINE_ANNOTATOR_BACKEND", "mock"),
             model_name=os.getenv("PIPELINE_MODEL_NAME", "Qwen/Qwen3.5-9B-Instruct"),
