@@ -1,0 +1,9 @@
+[project]
+name = "s3-dataset-tools"
+version = "0.1.0"
+description = "Minimalistic async library for creating and filter/map on text datasets stored in S3."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "websockets>=16.0",
+]
