@@ -1,6 +1,6 @@
 # Distributed S3 Dataset Tool
 
-Library for creating and annotating text-heavy datasets. This library uses S3 and parquet as storage backends, and supports a distributed- dataset created on one server might be annotated on another. The script talks to S3 directly with full write access; access control is planned at the moment.
+Library for creating and annotating text-heavy datasets. This library uses S3 and parquet as storage backends, and supports a distributed- dataset created on one server might be annotated on another.
 
 ## Design Choices
 
@@ -10,16 +10,25 @@ The dataset should be "streamed" from S3 (e.g., using DuckDB) and should not loa
 
 ## Coordination Primitives
 
-WSS-based Mutex (max: 60 seconds)
+Atomic WSS-based Mutex (max: 60 seconds)
 
 ```python
 async with WSSMutex("example-url-safe-lock-name"):
     ...
 ```
 
-S3-based long-running lock (hours), built on top of the WSS-based Mutex:
+S3-based long-running lock (hours), built on top of the atomic WSS-based Mutex. No renew is required, and lock expiry is based entirely on timestamp. To account for drifts, clients compare own time with S3 last-modified time to derive offset. S3 lock files are JSON files that contain a timestamp as well as the hostname of the machine.
 
 ```python
+async def _renew_lock_task(lock: S3Lock):
+    """Renew lock; returns if renewal is not successful."""
+    await asyncio.sleep((lock.ttl_ms / 1000) - 60)
+    try:
+        await lock.renew():
+    except:
+        return
+    
+
 async def merge(path: str):  # path might not be URL-safe
     async with S3Lock(path, ttl_ms=3_600_000) as lock:
         # Lock is currently granted to another worker
@@ -27,9 +36,14 @@ async def merge(path: str):  # path might not be URL-safe
         if not lock:
             return
 
+        renewal_task = ...
         # S3 Lock is free or expired- perform actual merge logic
+        # as soon as the renewal task exits (renewal fails), 
+        # interrupt the task doing work. 
         ...
 ```
+
+These primitives are used solely within the library to provide the functionalities described below.
 
 ## Example Usage
 
@@ -37,6 +51,8 @@ Copy `example.env` to `.env` and fill in:
 
 - S3 credentials
 - WSS Mutex API Base URL
+
+Note that the following are examples only- this library is agnostic to the exact data format, as long as it is JSON serializable/de-serializable using the standard Python JSON library.
 
 ### Example: Creating dataset from iterator
 
@@ -124,6 +140,8 @@ Similar to data generation, data annotation also uses S3 jsonl streaming to keep
 
 For efficient "join", each row of the annotation table references the exact source dataset and batch.
 
+If the annotation function raises an Error, that particular data row should be skipped, so that the same row can be retried in subsequent runs.
+
 ### Automated Clean-up and Merge
 
 Create a cronjob for the clean-up script:
@@ -132,7 +150,7 @@ Create a cronjob for the clean-up script:
 uv run --env-file .env s3_data_tool.cleanup
 ```
 
-The above would merge the jsonl and parquet files from exited and timed-out data generation/annotation workers. For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged. 
+The above would merge the jsonl and parquet files from exited and timed-out data generation/annotation workers. For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged.
 
 - Merge a mix of multiple jsonl files and parquet files into one parquet for each name-batch pair.
 - De-duplicate using sha digest and a built-in set() within each name-batch pair.
@@ -156,9 +174,8 @@ async def main():
         # annotator columns are named as {annotator_name}.{field_name}
         for _row in read_only_view:
             assert "text" in _row.keys()
-            assert "custom_search.summary" in _row.keys() 
+            assert "custom_search.summary" in _row.keys()
 ```
-
 
 ## Edge Cases
 
@@ -169,6 +186,24 @@ For a particular dataset name, if different batchs contain different columns, re
 ### Filtering Scope
 
 Filtering happens only within each dataset across batchs, but not across dataset (different names).
+
+### Partial/Corrupted jsonl files
+
+Rows in JSONLine files that cannot be processed are ignored. The rest of the file shall be processed as normal.
+
+### S3 Lock Timeout during work
+
+For data generation, concurrent work is acceptable, and de-duplication happens at merge time. S3 Lock is not required.
+
+For annotation, "annotator_view.annotate" should spawn a lock-renewal async task alongside the annotation tasks. 60 seconds before lock expires, the lock renewal task should try to renew the lock. If that is not successful, stop the annotation worker tasks and exit.
+
+### Annotating an empty or undefined dataset
+
+Trying to merge empty jsonl temporary files (including ones where no row could be parsed) would produce an empty parquet file.
+
+If the dataset parquet file exists but is empty (zero rows), annotation would produce a parquet file containing zero rows.
+
+If the dataset parquet file does not exist (e.g., jsonl chunks are produced but not yet merged in cron job,) filtering (annotation or export) would raise an error.
 
 ## S3 Storage Layout
 
