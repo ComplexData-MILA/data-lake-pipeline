@@ -8,42 +8,7 @@ The parquet tables shall be kept "lean" in the number of columns- each annotator
 
 The dataset should be "streamed" from S3 (e.g., using DuckDB) and should not loaded fully into memory (pandas, etc. should not be used.)
 
-## Coordination Primitives
-
-Atomic WSS-based Mutex (max: 60 seconds)
-
-```python
-async with WSSMutex("example-url-safe-lock-name"):
-    ...
-```
-
-S3-based long-running lock (hours), built on top of the atomic WSS-based Mutex. No renew is required, and lock expiry is based entirely on timestamp. To account for drifts, clients compare own time with S3 last-modified time to derive offset. S3 lock files are JSON files that contain a timestamp as well as the hostname of the machine.
-
-```python
-async def _renew_lock_task(lock: S3Lock):
-    """Renew lock; returns if renewal is not successful."""
-    await asyncio.sleep((lock.ttl_ms / 1000) - 60)
-    try:
-        await lock.renew():
-    except:
-        return
-    
-
-async def merge(path: str):  # path might not be URL-safe
-    async with S3Lock(path, ttl_ms=3_600_000) as lock:
-        # Lock is currently granted to another worker
-        # skip and try again next time (cron)
-        if not lock:
-            return
-
-        renewal_task = ...
-        # S3 Lock is free or expired- perform actual merge logic
-        # as soon as the renewal task exits (renewal fails), 
-        # interrupt the task doing work. 
-        ...
-```
-
-These primitives are used solely within the library to provide the functionalities described below.
+Coordination primitives are used solely within the library: `WSSMutex` (src/mutex.py) for short-lived atomic locks (max 60 seconds), and `S3Lock` (src/s3_lock.py) for long-running locks (hours) with TTL-based expiry.
 
 ## Example Usage
 
