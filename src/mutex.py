@@ -2,13 +2,17 @@ import asyncio
 import json
 import time
 import uuid
+from os import environ
+
 from websockets.asyncio.client import connect
 
 
 class WSSMutex:
-    def __init__(self, base_url: str, lock_name: str):
-        self.url = f"{base_url.rstrip('/')}/ws/{lock_name}" # TODO: read env var instead.
-        self.client_id = f"simple-{uuid.uuid4()}"
+    def __init__(self,  lock_name: str, base_url: str | None = None):
+        if not base_url:
+            base_url = environ["WSS_MUTEX_BASE_URL"]
+        self.url = f"{base_url.rstrip('/')}/ws/{lock_name}"
+        self.client_id = f"{uuid.uuid4()}"
         self.ws = None
         self._acquired_at = None
         self._ttl_ms = None
