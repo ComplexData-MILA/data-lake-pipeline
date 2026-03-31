@@ -24,7 +24,6 @@ Note that the following are examples only- this library is agnostic to the exact
 ```python
 streaming_configs = S3DataTool.StreamingConfigs(
     chunk_size=100,  # Update S3 jsonl buffer every 100 rows
-    should_merge=True,  # Merge into a parquet file after completing.
 )
 
 async def data_generator() -> AsyncIterator[dict[str, _JSONSerializable]]:
@@ -49,7 +48,7 @@ async def main():
         )
 ```
 
-Data rows are "streamed" to S3 in JSONLines format every chunk_size lines. If "should_merge" is set to True, the client would create merge the jsonl file into a parquet table, and delete the jsonl. Otherwise, the client would leave a jsonl file as output. The jsonl file and output parquet files are named with a random 6-character hex string, so that multiple instances of the same writer name and batch would not collide.
+Data rows are "streamed" to S3 in JSONLines format every chunk_size lines. The JSONL files are left for the automated cleanup job to merge into parquet tables. Files are named with a random 6-character hex string, so that multiple instances of the same writer name and batch would not collide.
 
 Multiple data generation workers might run at the same time for the same dataset name and batch. Duplicates would be eliminated during automated clean-up and merge (see below.)
 
@@ -115,7 +114,9 @@ Create a cronjob for the clean-up script:
 uv run --env-file .env s3_data_tool.cleanup
 ```
 
-The above would merge the jsonl and parquet files from exited and timed-out data generation/annotation workers. For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged.
+The cleanup job merges all JSONL files into parquet tables. This is the only place where merging occurs - data generation workers leave JSONL files as output, and the cleanup job consolidates them.
+
+For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged.
 
 - Merge a mix of multiple jsonl files and parquet files into one parquet for each name-batch pair.
 - deduplicate using sha digest and a built-in set() within each name-batch pair.

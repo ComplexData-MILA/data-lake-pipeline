@@ -17,3 +17,10 @@
   - Random 6-char hex ID for file naming to avoid collisions
   - JSONL chunked streaming with configurable chunk_size
   - JSONL files left for cleanup job to merge; merging deferred to automated cleanup
+
+- Remove JSONL-to-parquet merge from dataset generation
+  - Removed should_merge parameter from StreamingConfigs model
+  - Removed merge logic from dataset_generator.from_async_iterator
+  - Removed unused imports (merge_jsonl_to_parquet, delete_objects, list_jsonl_chunks)
+  - Updated README.md examples and documentation to clarify merge only happens in cleanup job
+  - Eliminates duplication between data generation and cleanup job
