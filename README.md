@@ -118,7 +118,7 @@ uv run --env-file .env s3_data_tool.cleanup
 The above would merge the jsonl and parquet files from exited and timed-out data generation/annotation workers. For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged.
 
 - Merge a mix of multiple jsonl files and parquet files into one parquet for each name-batch pair.
-- De-duplicate using sha digest and a built-in set() within each name-batch pair.
+- deduplicate using sha digest and a built-in set() within each name-batch pair.
 - Delete partial files.
 - If new partial files for the same name-batch pair in a subsequent clean-up run, these shall be merged with the existing rows, and the previous parquet file would be replaced or overwritten.
 
@@ -148,6 +148,8 @@ async def main():
 
 For a particular dataset name, if different batchs contain different columns, resultant views (e.g., for annotation) should present the columns in a best-effort manner. There is no need to determine or store the list of columns ahead of time. Rather, annotators (not this library) are responsible for handling missing columns. For DuckDB filtering purposes, missing columns should be considered as None/null and neither True nor False.
 
+If different jsonl files for the same batch contain different "deduplicate_on" values, the deduplication during merge should use the intersection of all values. If a column is missing in some rows, that column should be "None". Two rows are considered "duplicates" if and only if values ar ethe same across all "deduplicate_on" columns.
+
 ### Filtering Scope
 
 Filtering happens only within each dataset across batchs, but not across dataset (different names).
@@ -158,7 +160,7 @@ Rows in JSONLine files that cannot be processed are ignored. The rest of the fil
 
 ### S3 Lock Timeout during work
 
-For data generation, concurrent work is acceptable, and de-duplication happens at merge time. S3 Lock is not required.
+For data generation, concurrent work is acceptable, and deduplication happens at merge time. S3 Lock is not required.
 
 For annotation, "annotator_view.annotate" should spawn a lock-renewal async task alongside the annotation tasks. 60 seconds before lock expires, the lock renewal task should try to renew the lock. If that is not successful, stop the annotation worker tasks and exit.
 
@@ -176,7 +178,7 @@ If the dataset parquet file does not exist (e.g., jsonl chunks are produced but 
 - dataset_name/
     - batch_name/
         # Temporary files, where 123abc denotes a random 6-character hex string
-        - 123abc.manifest
+        - 123abc.manifest.json
         - 123abc_chunk_00000.jsonl
         - ...
         # Merged files

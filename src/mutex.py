@@ -12,7 +12,7 @@ class WSSMutex:
         if not base_url:
             base_url = environ["WSS_MUTEX_BASE_URL"]
         self.url = f"{base_url.rstrip('/')}/ws/{lock_name}"
-        self.client_id = f"{uuid.uuid4()}"
+        self.client_id = uuid.uuid4()
         self.ws = None
         self._acquired_at = None
         self._ttl_ms = None
