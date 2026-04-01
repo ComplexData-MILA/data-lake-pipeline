@@ -3,11 +3,14 @@ import json
 import os
 import secrets
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aioboto3 import Session
 
 from s3_data_tool.models import RunManifest
+
+if TYPE_CHECKING:
+    from types_aiobotocore_s3 import S3Client
 
 
 def generate_hex_id() -> str:
@@ -15,21 +18,21 @@ def generate_hex_id() -> str:
 
 
 async def upload_jsonl_chunk(
-    s3_client: Any, bucket: str, key: str, rows: list[dict]
+    s3_client: "S3Client", bucket: str, key: str, rows: list[dict]
 ) -> None:
     body = "\n".join(json.dumps(row) for row in rows)
     await s3_client.put_object(Bucket=bucket, Key=key, Body=body.encode("utf-8"))
 
 
 async def upload_manifest(
-    s3_client: Any, bucket: str, key: str, manifest: RunManifest
+    s3_client: "S3Client", bucket: str, key: str, manifest: RunManifest
 ) -> None:
     body = manifest.model_dump_json()
     await s3_client.put_object(Bucket=bucket, Key=key, Body=body.encode("utf-8"))
 
 
 async def create_test_dataset(
-    s3_client: Any,
+    s3_client: "S3Client",
     bucket: str,
     prefix: str,
     dataset_name: str = "test_dataset",

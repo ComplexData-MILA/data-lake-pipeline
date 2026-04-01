@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tqdm.auto import tqdm
 
@@ -11,9 +11,12 @@ from .s3_utils import (
     upload_run_manifest,
 )
 
+if TYPE_CHECKING:
+    from types_aiobotocore_s3 import S3Client
+
 
 class DatasetGenerator:
-    def __init__(self, s3_client: Any, bucket: str, prefix: str):
+    def __init__(self, s3_client: "S3Client", bucket: str, prefix: str):
         self._s3_client = s3_client
         self._bucket = bucket
         self._prefix = prefix.rstrip("/")

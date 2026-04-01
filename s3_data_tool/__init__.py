@@ -1,4 +1,18 @@
+from .filter import AllFilter, AnyFilter, BooleanFilter, FilterNode, RawDuckFilter
+from .data_filtering import AnnotationLockError, DatasetNotMergedError
+from .models import Annotation, DataItem, StreamingConfigs
 from .s3_data_tool import S3DataTool
-from .models import StreamingConfigs
 
-__all__ = ["S3DataTool", "StreamingConfigs"]
+__all__ = [
+    "S3DataTool",
+    "StreamingConfigs",
+    "Annotation",
+    "DataItem",
+    "BooleanFilter",
+    "AllFilter",
+    "AnyFilter",
+    "RawDuckFilter",
+    "FilterNode",
+    "AnnotationLockError",
+    "DatasetNotMergedError",
+]

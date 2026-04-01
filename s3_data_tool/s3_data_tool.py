@@ -6,6 +6,8 @@ from typing import Any
 import aioboto3
 
 from .dataset_generator import DatasetGenerator
+from .filter import FilterNode
+from .data_filtering import FilterForAnnotation, FilterForExport
 from .models import StreamingConfigs
 
 
@@ -38,3 +40,38 @@ class S3DataTool:
 
         async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
             yield DatasetGenerator(s3_client, self._bucket, self._prefix)
+
+    @asynccontextmanager
+    async def filter_for_annotation(
+        self,
+        name: str,
+        annotator_name: str,
+        filter: FilterNode | None = None,
+    ) -> AsyncIterator[FilterForAnnotation]:
+        """Create annotation view with optional filter."""
+        kwargs: dict[str, Any] = {}
+        if self._endpoint_url:
+            kwargs["endpoint_url"] = self._endpoint_url
+
+        async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
+            view = FilterForAnnotation(
+                s3_client, self._bucket, self._prefix, name, annotator_name, filter
+            )
+            async with view:
+                yield view
+
+    @asynccontextmanager
+    async def filter_for_export(
+        self,
+        name: str,
+        filter: FilterNode | None = None,
+    ) -> AsyncIterator[FilterForExport]:
+        """Create read-only export view with optional filter."""
+        kwargs: dict[str, Any] = {}
+        if self._endpoint_url:
+            kwargs["endpoint_url"] = self._endpoint_url
+
+        async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
+            view = FilterForExport(s3_client, self._bucket, self._prefix, name, filter)
+            async with view:
+                yield view

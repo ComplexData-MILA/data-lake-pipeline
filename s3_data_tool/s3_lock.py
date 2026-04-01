@@ -29,17 +29,24 @@ Example:
                 return
 """
 
+import asyncio
 import json
 import logging
 import re
 import socket
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any, Coroutine, TypeVar
 
 from .mutex import WSSMutex
 
+if TYPE_CHECKING:
+    from types_aiobotocore_s3 import S3Client
+
 logger = logging.getLogger(__name__)
+LOCK_RENEWAL_BUFFER_SECONDS = 60
+
+T = TypeVar("T")
 
 
 class LockRenewalError(Exception):
@@ -51,7 +58,7 @@ class S3Lock:
         self,
         path: str,
         ttl_ms: int,
-        s3_client: Any,
+        s3_client: "S3Client",
         bucket: str,
         prefix: str = "locks/",
     ):
@@ -154,3 +161,47 @@ class S3Lock:
 
     def __bool__(self) -> bool:
         return self._acquired
+
+
+async def renew_lock_periodically(lock: S3Lock) -> LockRenewalError:
+    """Background task to renew lock before expiry.
+
+    If renewal did not succeed, this task would exit.
+    """
+    seconds_to_renewal = (lock._ttl_ms / 1000) - LOCK_RENEWAL_BUFFER_SECONDS
+    try:
+        await asyncio.sleep(seconds_to_renewal)
+        await lock.renew()
+    except Exception as e:
+        if e is not asyncio.CancelledError:
+            logger.error(f"Lock renewal failed: {e}")
+
+    return LockRenewalError(e)
+
+
+async def gather_subject_to_lock_renewal(
+    lock: S3Lock, tasks: list[asyncio.Task[T]]
+) -> list[T | BaseException]:
+    """Gather as long as lock is successfully renewed- interrupt gather otherwise.
+
+    Returns partial results. Might be out-of-order.
+
+    Returns all exceptions other than asyncio.CancelledError.
+    """
+    renewal_task = asyncio.create_task(renew_lock_periodically(lock))
+    pending: set[asyncio.Task[T | LockRenewalError]] = {*tasks, renewal_task}
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        if renewal_task in done:
+            for t in pending:
+                t.cancel()
+
+            break
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return [
+        r
+        for r in results
+        if not isinstance(r, (asyncio.CancelledError, LockRenewalError))
+    ]
