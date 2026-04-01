@@ -8,7 +8,7 @@ The parquet tables shall be kept "lean" in the number of columns- each annotator
 
 The dataset should be "streamed" from S3 (e.g., using DuckDB) and should not loaded fully into memory (pandas, etc. should not be used.)
 
-Coordination primitives are used solely within the library: `WSSMutex` (src/mutex.py) for short-lived atomic locks (max 60 seconds), and `S3Lock` (src/s3_lock.py) for long-running locks (hours) with TTL-based expiry.
+Coordination primitives are used solely within the library: `WSSMutex` (s3_data_tool/mutex.py) for short-lived atomic locks (max 60 seconds), and `S3Lock` (s3_data_tool/s3_lock.py) for long-running locks (hours) with TTL-based expiry.
 
 ## Example Usage
 
