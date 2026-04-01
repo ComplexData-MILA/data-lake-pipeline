@@ -188,11 +188,12 @@ If the dataset parquet file does not exist (e.g., jsonl chunks are produced but 
         # Annotations for this batch
     - annotations/
         - annotator_name/
-            - batch_name/ # one folder per dataset batch
-                - manifest.yaml
+            - .temp/
                 # Temporary files
                 - .lock
                 - chunk_00000.jsonl
+            - batch_name/ # one folder per dataset batch
+                - manifest.yaml
                 - ...
                 # Merged files
                 - merged.parquet

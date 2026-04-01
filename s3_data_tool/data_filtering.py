@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 from .async_utils import with_semaphore
 from .filter import FilterNode
 from .models import Annotation, DataItem, StreamingConfigs
-from .s3_lock import S3Lock, as_completed_subject_to_renewal
+from .s3_lock import S3Lock, gather_subject_to_lock_renewal
 from .s3_utils import generate_hex_id, s3_object_exists, upload_jsonl_chunk
 from .cleanup import enumerate_batches
 
@@ -68,10 +68,10 @@ async def filter_rows_with_duckdb(
     if (not where_clause) or (where_clause == "TRUE"):
         return rows
 
-    df = pd.DataFrame(rows)
     conn = duckdb.connect()
     try:
-        conn.execute("CREATE TABLE data AS SELECT * FROM df")
+        conn.register("df_view", pd.DataFrame(rows))
+        conn.execute("CREATE TABLE data AS SELECT * FROM df_view")
         result = conn.execute(f"SELECT * FROM data WHERE {where_clause}").fetchall()
         col_names = [desc[0] for desc in conn.execute("DESCRIBE data").fetchall()]
         return [dict(zip(col_names, row)) for row in result]
@@ -143,17 +143,15 @@ class FilterForAnnotation(FilterForExport):
         dataset_name: str,
         annotator_name: str,
         filter: FilterNode | None,
-        lock_ttl_ms: int = 3_600_000
+        lock_ttl_ms: int = 3_600_000,
     ):
         """Add S3 lock on top of FilterForExport."""
         super().__init__(s3_client, bucket, prefix, dataset_name, filter)
         self._dataset_name = dataset_name
         self._annotator_name = annotator_name
-        
-        lock_path = (
-            f"{self._prefix}/{dataset_name}/annotations/{annotator_name}"
-        )
-        
+
+        lock_path = f"{self._prefix}/{dataset_name}/annotations/{annotator_name}"
+
         self._lock: S3Lock = S3Lock(lock_path, lock_ttl_ms, s3_client, bucket)
 
     async def __aenter__(self) -> "FilterForAnnotation":
@@ -214,14 +212,13 @@ class FilterForAnnotation(FilterForExport):
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
 
-        # TODO: Iterate on data from batches, reusing base logic from FilterForExport.
+        # TODO: the following might repeat logic from dataset_generator.py for batched jsonl upload.
+        # TODO: extract into a reused function in s3_utils.py if appropriate.
         tasks = [
-            
+            producer_task,
+            input_queue.join(),
+            worker_tasks,
+            output_queue.join(),
+            upload_task,
         ]
-
-        # TODO: reuse logic from dataset_generator.py for batched jsonl upload.
-        # TODO: extract into a reused function in s3_utils.py if appropriate. 
-        for result in as_completed_subject_to_renewal(self._lock, tasks):
-            """Add result to buffer. Upload to S3 if buffer is full."""
-
-        """Upload any training data in buffer."""
+        await gather_subject_to_lock_renewal(self._lock, tasks)
