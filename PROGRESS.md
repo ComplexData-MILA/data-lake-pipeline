@@ -24,3 +24,9 @@
   - Removed unused imports (merge_jsonl_to_parquet, delete_objects, list_jsonl_chunks)
   - Updated README.md examples and documentation to clarify merge only happens in cleanup job
   - Eliminates duplication between data generation and cleanup job
+
+- Implement run manifest for tracking deduplication and streaming configs
+  - src/models.py: RunManifest and BatchManifest Pydantic models
+  - src/s3_utils.py: upload_run_manifest function
+  - src/dataset_generator.py: Create and upload manifest at start/end of run
+  - Manifest tracks run_id, deduplicate_on, streaming_configs, completion status, timestamps

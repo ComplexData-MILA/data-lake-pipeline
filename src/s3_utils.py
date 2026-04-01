@@ -6,9 +6,25 @@ from typing import Any
 import duckdb
 import pyarrow.parquet as pq
 
+from .models import RunManifest
+
 
 def generate_hex_id() -> str:
     return secrets.token_hex(3)
+
+
+async def upload_run_manifest(
+    s3_client: Any,
+    bucket: str,
+    key: str,
+    manifest: RunManifest,
+) -> None:
+    body = manifest.model_dump_json()
+    await s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body.encode("utf-8"),
+    )
 
 
 async def upload_jsonl_chunk(
