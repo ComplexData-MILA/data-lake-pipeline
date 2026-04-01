@@ -30,3 +30,6 @@
   - src/s3_utils.py: upload_run_manifest function
   - src/dataset_generator.py: Create and upload manifest at start/end of run
   - Manifest tracks run_id, deduplicate_on, streaming_configs, completion status, timestamps
+
+- Add missing S3 environment variables to example.env
+  - Added S3_BUCKET (required), S3_PREFIX (optional), S3_ENDPOINT_URL (optional)

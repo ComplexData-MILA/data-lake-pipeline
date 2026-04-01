@@ -17,11 +17,18 @@ class S3DataTool:
         bucket: str | None = None,
         prefix: str | None = None,
         endpoint_url: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
     ):
         self._bucket = bucket or os.environ["S3_BUCKET"]
         self._prefix = prefix or os.environ.get("S3_PREFIX", "datasets")
         self._endpoint_url = endpoint_url or os.environ.get("S3_ENDPOINT_URL")
-        self._session = aioboto3.Session()
+        self._access_key = access_key or os.environ.get("S3_ACCESS_KEY")
+        self._secret_key = secret_key or os.environ.get("S3_SECRET_KEY")
+        self._session = aioboto3.Session(
+            aws_access_key_id=self._access_key,
+            aws_secret_access_key=self._secret_key,
+        )
 
     @asynccontextmanager
     async def dataset_generator(self) -> AsyncIterator[DatasetGenerator]:
