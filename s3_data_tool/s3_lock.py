@@ -37,7 +37,7 @@ import time
 import uuid
 from typing import Any
 
-from mutex import WSSMutex
+from .mutex import WSSMutex
 
 logger = logging.getLogger(__name__)
 

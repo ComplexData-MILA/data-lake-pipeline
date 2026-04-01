@@ -27,7 +27,7 @@ class WSSMutex:
             raise Exception("Handshake failed")
 
         # 2. Send Client Hello
-        await self.ws.send(json.dumps({"type": "hello", "clientId": self.client_id}))
+        await self.ws.send(json.dumps({"type": "hello", "clientId": str(self.client_id)}))
 
     async def acquire(self, ttl_ms: int = 10_000) -> None:
         """Acquires the lock, retrying automatically if busy."""
@@ -43,6 +43,7 @@ class WSSMutex:
             if msg["type"] == "granted":
                 self._acquired_at = time.monotonic()
                 self._ttl_ms = ttl_ms
+                return
 
             elif msg["type"] == "busy":
                 # Simplified: Just wait 1 second and retry
@@ -70,6 +71,7 @@ class WSSMutex:
             print(f"Warning: unexpected release response {msg}")
 
         await self.ws.close()
+        self.ws = None
 
     async def __aenter__(self):
         await self.acquire()

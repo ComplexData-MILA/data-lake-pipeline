@@ -33,3 +33,12 @@
 
 - Add missing S3 environment variables to example.env
   - Added S3_BUCKET (required), S3_PREFIX (optional), S3_ENDPOINT_URL (optional)
+
+- Add test suite for WSSMutex (tests/test_mutex.py)
+  - Added pytest and pytest-asyncio as test dependencies in pyproject.toml
+  - Test cases: connect/handshake, acquire/release, context manager, concurrent contention, TTL expiration warning, custom base_url, env fallback
+
+- Fix bugs discovered by WSSMutex tests
+  - Fixed acquire() missing return after "granted" (infinite loop bug)
+  - Fixed release() not setting ws=None after close
+  - Added pytest-timeout with 10s limit to prevent hanging tests
