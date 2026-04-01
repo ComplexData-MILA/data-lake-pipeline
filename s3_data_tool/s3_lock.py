@@ -29,7 +29,6 @@ Example:
                 return
 """
 
-import asyncio
 import json
 import logging
 import re
@@ -67,7 +66,7 @@ class S3Lock:
         self._mutex_name = self._sanitize_path(f"s3lock-{path}")
 
     def _sanitize_path(self, path: str) -> str:
-        return re.sub(r'[^a-zA-Z0-9._-]', '-', path)
+        return re.sub(r"[^a-zA-Z0-9._-]", "-", path)
 
     async def acquire(self) -> bool:
         async with WSSMutex(self._mutex_name):

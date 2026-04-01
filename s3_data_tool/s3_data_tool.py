@@ -36,5 +36,5 @@ class S3DataTool:
         if self._endpoint_url:
             kwargs["endpoint_url"] = self._endpoint_url
 
-        async with self._session.client("s3", **kwargs) as s3_client:
+        async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
             yield DatasetGenerator(s3_client, self._bucket, self._prefix)

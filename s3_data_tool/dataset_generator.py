@@ -2,6 +2,8 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
 
+from tqdm.auto import tqdm
+
 from .models import RunManifest, StreamingConfigs
 from .s3_utils import (
     generate_hex_id,
@@ -41,7 +43,7 @@ class DatasetGenerator:
         buffer: list[dict[str, Any]] = []
         chunk_idx = 0
 
-        async for row in iterator:
+        async for row in tqdm(iterator, ncols=80):
             buffer.append(row)
             if len(buffer) >= streaming_configs.chunk_size:
                 key = f"{base_path}/{run_id}_chunk_{chunk_idx:05d}.jsonl"
