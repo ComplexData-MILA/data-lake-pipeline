@@ -2,3 +2,5 @@ Each time you take an action in "Build" mode, you should add a brief summary of 
 
 
 Use Pydantic instead of dataclasses whenever possible.
+
+You may test your implementations using the S3 server configured in `.env`.
