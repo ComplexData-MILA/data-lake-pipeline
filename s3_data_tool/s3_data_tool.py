@@ -46,7 +46,11 @@ class S3DataTool:
         self,
         name: str,
         annotator_name: str,
-        filter: FilterNode | None = None,
+        base_columns: list[str],
+        annotator_columns: dict[str, list[str]] | None = None,
+        base_filter: FilterNode | None = None,
+        annotator_filters: dict[str, FilterNode] | None = None,
+        lock_ttl_ms: int = 3600000,
     ) -> AsyncIterator[FilterForAnnotation]:
         """Create annotation view with optional filter."""
         kwargs: dict[str, Any] = {}
@@ -55,7 +59,16 @@ class S3DataTool:
 
         async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
             view = FilterForAnnotation(
-                s3_client, self._bucket, self._prefix, name, annotator_name, filter
+                s3_client,
+                self._bucket,
+                self._prefix,
+                dataset_name=name,
+                annotator_name=annotator_name,
+                annotator_columns=annotator_columns,
+                base_columns=base_columns,
+                base_filter=base_filter,
+                annotator_filters=annotator_filters,
+                lock_ttl_ms=lock_ttl_ms,
             )
             async with view:
                 yield view

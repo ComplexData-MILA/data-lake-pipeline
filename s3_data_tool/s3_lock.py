@@ -193,7 +193,10 @@ async def gather_subject_to_lock_renewal(
 
     while pending:
         done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        if renewal_task in done:
+        # Stop if
+        # - renewal is unsuccessful, or
+        # - all real tasks (other than renewal) completed.
+        if (renewal_task in done) or (len(pending) == 1):
             for t in pending:
                 t.cancel()
 

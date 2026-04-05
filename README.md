@@ -6,7 +6,7 @@ Library for creating and annotating text-heavy datasets. This library uses S3 an
 
 The parquet tables shall be kept "lean" in the number of columns- each annotator would create an annotation parquet table of its own, with references to IDs in the original text parquet. When a new annotator is added, a new parquet file is created, without duplicating any existing fields. No original text would be duplicated. This approach sacrifices random read and join efficiency for the ability to add new annotator columns with minimal overhead.
 
-The dataset should be "streamed" from S3 (e.g., using DuckDB) and should not loaded fully into memory (pandas, etc. should not be used.)
+During merge and clean-up, all data rows in a batch are kept in memory at the same time- a limitation of the parquet format Rows in the main dataset parquet are "streamed" from S3 using DuckDB and not loaded fully into memory (pandas, etc. should not be used.)
 
 Coordination primitives are used solely within the library: `WSSMutex` (s3_data_tool/mutex.py) for short-lived atomic locks (max 60 seconds), and `S3Lock` (s3_data_tool/s3_lock.py) for long-running locks (hours) with TTL-based expiry.
 
@@ -48,7 +48,7 @@ async def main():
         )
 ```
 
-Data rows are "streamed" to S3 in JSONLines format every chunk_size lines. The JSONL files are left for the automated cleanup job to merge into parquet tables. Files are named with a random 6-character hex string, so that multiple instances of the same writer name and batch would not collide.
+Data rows are "streamed" to S3 in JSONLines format every chunk_size lines. The JSONL files are left for the automated clean-up job to merge into parquet tables. Files are named with a random 6-character hex string, so that multiple instances of the same writer name and batch would not collide.
 
 Multiple data generation workers might run at the same time for the same dataset name and batch. Duplicates would be eliminated during automated clean-up and merge (see below.)
 
@@ -57,7 +57,7 @@ Multiple data generation workers might run at the same time for the same dataset
 Filter-map allows layered annotation- each subsequent annotation run would be on a narrower subset, filtered based on existing annotations.
 
 ```python
-from s3_data_tool import Annotation, Filter, S3DataTool
+from s3_data_tool import Annotation, S3DataTool
 
 streaming_configs = S3DataTool.StreamingConfigs(...)  # same as in data generation
 
@@ -70,7 +70,7 @@ async def annotate(item: DataItem) -> Annotation:
 
     # id, batch, etc. are automatically assigned and transparent to annotator.
     return Annotation(
-        {
+        data={
             "found": result.found, # bool
             "summary": result.summary, # str
         },
@@ -83,14 +83,11 @@ async def main():
     async with S3DataTool().filter_for_annotation(
         name="example_dataset",
         annotator_name="custom_search",  # Name of the current annotator
+        base_columns=["text"],
         # Optionally, specify filters; these are compiled into DuckDB query.
-        # supports Filter.all for AND and Filter.any for OR. Nesting is supported.
+        # supports AllFilter for AND and AnyFilter for OR. Nesting is supported.
         # Only boolean comparison is supported. All other comparisons shall be defined
         # using raw DuckDB filters. See edge cases regarding handling missing values.
-        filter=Filter.all([
-            Filter.boolean(annotator="validity_filter", field="is_valid", value=True),
-            Filter.raw_duck("..."),
-        ])
     ) as annotator_view:
         await annotator_view.annotate(
             annotate,
@@ -111,10 +108,10 @@ If the annotation function raises an Error, that particular data row should be s
 Create a cronjob for the clean-up script:
 
 ```bash
-uv run --env-file .env s3_data_tool.cleanup
+uv run --env-file .env s3_data_tool.clean-up
 ```
 
-The cleanup job merges all JSONL files into parquet tables. This is the only place where merging occurs - data generation workers leave JSONL files as output, and the cleanup job consolidates them.
+The clean-up job merges all JSONL files into parquet tables. This is the only place where merging occurs - data generation workers leave JSONL files as output, and the clean-up job consolidates them.
 
 For data generation, the result would be one parquet for each name-batch pair. Edge case: if within the same name-batch pair, some jsonl/parquet contains a column while others don't, the columns are merged.
 
@@ -134,7 +131,7 @@ For annotation, the result would be one parquet for each name, batch, and annota
 async def main():
     async with S3DataTool().filter_for_export(
         # Same as specified in filter_for_annotation
-        filter=Filter.all(...)
+        filter=AllFilter(filters=[...])
     ) as read_only_view:
         # read_only_view is an iterator of dict[str, _JSONSerializable]
         # annotator columns are named as {annotator_name}.{field_name}

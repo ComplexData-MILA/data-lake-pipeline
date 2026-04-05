@@ -7,16 +7,14 @@ from pydantic import BaseModel
 class BooleanFilter(BaseModel):
     """Filter on boolean field in dataset or annotation."""
     type: Literal["boolean"] = "boolean"
-    annotator: str | None = None
     field: str
     value: bool
 
     def compile(self, available_columns: set[str]) -> str:
         """Compile to DuckDB WHERE clause."""
-        col = f"{self.annotator}.{self.field}" if self.annotator else self.field
-        if col not in available_columns:
+        if self.field not in available_columns:
             return "FALSE"
-        return f"{col} = {self.value}"
+        return f"{self.field} = {self.value}"
 
 
 class RawDuckFilter(BaseModel):

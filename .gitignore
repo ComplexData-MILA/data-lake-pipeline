@@ -12,3 +12,10 @@ uv.lock
 
 # Secrets
 .env
+
+# Viewer - Python backend
+viewer/backend/.venv/
+
+# Viewer - Frontend
+viewer/frontend/node_modules/
+viewer/frontend/dist/

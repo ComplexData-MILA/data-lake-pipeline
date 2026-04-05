@@ -45,15 +45,9 @@ class TestBooleanFilterCompilation:
         result = f.compile({"is_valid", "text", "source_id"})
         assert result == "is_valid = True"
 
-    def test_compile_with_existing_annotation_column(self):
-        """Test compilation when annotation column exists."""
-        f = BooleanFilter(field="is_valid", value=True, annotator="validity_filter")
-        result = f.compile({"validity_filter.is_valid", "text"})
-        assert result == "validity_filter.is_valid = True"
-
     def test_compile_with_missing_column_returns_false(self):
         """Test compilation returns FALSE for missing column."""
-        f = BooleanFilter(field="is_valid", value=True, annotator="validity_filter")
+        f = BooleanFilter(field="is_valid", value=True)
         result = f.compile({"text", "source_id"})
         assert result == "FALSE"
 
@@ -68,16 +62,6 @@ class TestBooleanFilterCompilation:
         f = BooleanFilter(field="is_valid", value=True)
         result = f.compile(set())
         assert result == "FALSE"
-
-    def test_dataset_vs_annotation_column_qualification(self):
-        """Test that dataset and annotation columns are qualified differently."""
-        dataset_filter = BooleanFilter(field="priority", value=True)
-        annotation_filter = BooleanFilter(field="priority", value=True, annotator="ranker")
-
-        cols = {"priority", "ranker.priority"}
-
-        assert dataset_filter.compile(cols) == "priority = True"
-        assert annotation_filter.compile(cols) == "ranker.priority = True"
 
 
 class TestAllFilterCompilation:
@@ -100,11 +84,11 @@ class TestAllFilterCompilation:
     def test_compile_multiple_filters(self):
         """Test multiple filters combined with AND."""
         f = AllFilter(filters=[
-            BooleanFilter(field="is_valid", value=True, annotator="validator"),
-            BooleanFilter(field="is_duplicate", value=False, annotator="dedup"),
+            BooleanFilter(field="is_valid", value=True),
+            BooleanFilter(field="is_duplicate", value=False),
         ])
-        result = f.compile({"validator.is_valid", "dedup.is_duplicate"})
-        assert result == "(validator.is_valid = True AND dedup.is_duplicate = False)"
+        result = f.compile({"is_valid", "is_duplicate"})
+        assert result == "(is_valid = True AND is_duplicate = False)"
 
     def test_compile_with_missing_column(self):
         """Test AND with one missing column."""
@@ -145,11 +129,11 @@ class TestAnyFilterCompilation:
     def test_compile_multiple_filters(self):
         """Test multiple filters combined with OR."""
         f = AnyFilter(filters=[
-            BooleanFilter(field="is_valid", value=True, annotator="validator1"),
-            BooleanFilter(field="is_valid", value=True, annotator="validator2"),
+            BooleanFilter(field="is_valid", value=True),
+            BooleanFilter(field="is_featured", value=True),
         ])
-        result = f.compile({"validator1.is_valid", "validator2.is_valid"})
-        assert result == "(validator1.is_valid = True OR validator2.is_valid = True)"
+        result = f.compile({"is_valid", "is_featured"})
+        assert result == "(is_valid = True OR is_featured = True)"
 
     def test_compile_with_missing_column(self):
         """Test OR with one missing column."""
@@ -177,14 +161,14 @@ class TestNestedFilters:
         """Test nested OR within AND."""
         f = AllFilter(filters=[
             AnyFilter(filters=[
-                BooleanFilter(field="is_valid", value=True, annotator="v1"),
-                BooleanFilter(field="is_valid", value=True, annotator="v2"),
+                BooleanFilter(field="is_valid", value=True),
+                BooleanFilter(field="is_featured", value=True),
             ]),
             BooleanFilter(field="priority", value=True),
         ])
-        cols = {"v1.is_valid", "v2.is_valid", "priority"}
+        cols = {"is_valid", "is_featured", "priority"}
         result = f.compile(cols)
-        assert result == "((v1.is_valid = True OR v2.is_valid = True) AND priority = True)"
+        assert result == "((is_valid = True OR is_featured = True) AND priority = True)"
 
     def test_any_containing_all(self):
         """Test nested AND within OR."""
@@ -261,12 +245,11 @@ class TestFilterSerialization:
 
     def test_boolean_filter_serialize_deserialize(self):
         """Test round-trip serialization."""
-        f = BooleanFilter(field="is_valid", value=True, annotator="validator")
+        f = BooleanFilter(field="is_valid", value=True)
         data = f.model_dump()
         f2 = BooleanFilter(**data)
         assert f2.field == "is_valid"
         assert f2.value is True
-        assert f2.annotator == "validator"
 
     def test_nested_filter_serialize_deserialize(self):
         """Test nested filter serialization."""
@@ -322,11 +305,11 @@ def test_prefix():
 async def sample_parquet_data():
     """Create sample parquet data for testing."""
     rows = [
-        {"id": "1", "text": "Valid text one", "is_valid": True, "priority": True},
-        {"id": "2", "text": "Invalid text", "is_valid": False, "priority": False},
-        {"id": "3", "text": "Valid text two", "is_valid": True, "priority": False},
-        {"id": "4", "text": "Another valid", "is_valid": True, "priority": True},
-        {"id": "5", "text": "Not valid", "is_valid": False, "priority": True},
+        {"id": "1", "text": "Valid text one", "is_valid": True, "priority": True, "_batch": "batch1"},
+        {"id": "2", "text": "Invalid text", "is_valid": False, "priority": False, "_batch": "batch1"},
+        {"id": "3", "text": "Valid text two", "is_valid": True, "priority": False, "_batch": "batch1"},
+        {"id": "4", "text": "Another valid", "is_valid": True, "priority": True, "_batch": "batch1"},
+        {"id": "5", "text": "Not valid", "is_valid": False, "priority": True, "_batch": "batch1"},
     ]
     return rows
 
@@ -473,7 +456,7 @@ class TestLiveS3ParquetQueries:
 
                 filter = AllFilter(filters=[
                     BooleanFilter(field="is_valid", value=True),
-                    BooleanFilter(field="missing_column", value=True, annotator="validator"),
+                    BooleanFilter(field="missing_column", value=True),
                 ])
                 where_clause = filter.compile(available_columns)
 
@@ -695,21 +678,21 @@ class TestSchemaDiscovery:
             {
                 "key": f"{test_prefix}/filter_test_{test_id}/batch1/merged.parquet",
                 "rows": [
-                    {"id": "1", "text": "a", "is_valid": True},
-                    {"id": "2", "text": "b", "is_valid": False},
+                    {"id": "1", "text": "a", "is_valid": True, "_batch": "batch1"},
+                    {"id": "2", "text": "b", "is_valid": False, "_batch": "batch1"},
                 ],
             },
             {
                 "key": f"{test_prefix}/filter_test_{test_id}/batch2/merged.parquet",
                 "rows": [
-                    {"id": "3", "text": "c", "priority": True},
-                    {"id": "4", "text": "d", "priority": False},
+                    {"id": "3", "text": "c", "priority": True, "_batch": "batch2"},
+                    {"id": "4", "text": "d", "priority": False, "_batch": "batch2"},
                 ],
             },
             {
                 "key": f"{test_prefix}/filter_test_{test_id}/batch3/merged.parquet",
                 "rows": [
-                    {"id": "5", "text": "e", "is_valid": True, "priority": True},
+                    {"id": "5", "text": "e", "is_valid": True, "priority": True, "_batch": "batch3"},
                 ],
             },
         ]

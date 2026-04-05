@@ -1,6 +1,8 @@
-"""Integration tests for filter_view module."""
+"""Integration tests for dataset filter module."""
 
+import asyncio
 import io
+import logging
 import os
 import uuid
 from typing import Any
@@ -8,9 +10,14 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import pytest_asyncio
 
 from s3_data_tool.filter import AllFilter, BooleanFilter
-from s3_data_tool.data_filtering import AnnotationLockError, DatasetNotMergedError
+from s3_data_tool.data_filtering import (
+    AnnotationLockError,
+    DatasetNotMergedError,
+)
+from s3_data_tool.dataset_generator import _transform_row_for_jsonl
 from s3_data_tool.models import Annotation, DataItem
 
 
@@ -26,9 +33,9 @@ def create_parquet_buffer(rows: list[dict]) -> io.BytesIO:
     return buf
 
 
-@pytest.fixture
-def s3_setup():
-    """Get S3 configuration from environment."""
+@pytest_asyncio.fixture
+async def s3_setup():
+    """Get S3 configuration from environment and clean bucket."""
     import aioboto3
 
     endpoint_url = os.environ.get("S3_ENDPOINT_URL")
@@ -45,6 +52,17 @@ def s3_setup():
     kwargs: dict[str, Any] = {}
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
+
+    async with session.client("s3", **kwargs) as client:  # type: ignore
+        paginator = client.get_paginator("list_objects_v2")
+        keys_to_delete = []
+        async for page in paginator.paginate(Bucket=bucket):
+            for obj in page.get("Contents", []):
+                keys_to_delete.append({"Key": obj["Key"]})
+        if keys_to_delete:
+            await client.delete_objects(
+                Bucket=bucket, Delete={"Objects": keys_to_delete}
+            )
 
     return session, kwargs, bucket, prefix
 
@@ -64,7 +82,9 @@ class TestExportView:
         dataset_name = f"export_test_{test_id}"
 
         async with session.client("s3", **kwargs) as client:
-            view = FilterForExport(client, bucket, prefix, dataset_name, None)
+            view = FilterForExport(
+                client, bucket, prefix, dataset_name, base_columns=["id", "text"]
+            )
             rows = []
             async with view:
                 async for row in view:
@@ -80,9 +100,9 @@ class TestExportView:
         dataset_name = f"export_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello", "is_valid": True},
-            {"id": "2", "text": "World", "is_valid": False},
-            {"id": "3", "text": "Test", "is_valid": True},
+            {"id": "1", "text": "Hello", "is_valid": True, "_batch": "batch1"},
+            {"id": "2", "text": "World", "is_valid": False, "_batch": "batch1"},
+            {"id": "3", "text": "Test", "is_valid": True, "_batch": "batch1"},
         ]
 
         async with session.client("s3", **kwargs) as client:
@@ -91,14 +111,20 @@ class TestExportView:
                 buf = create_parquet_buffer(dataset_rows)
                 await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
 
-                view = FilterForExport(client, bucket, prefix, dataset_name, None)
+                view = FilterForExport(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    base_columns=["id", "text", "is_valid"],
+                )
                 rows = []
                 async with view:
                     async for row in view:
                         rows.append(row)
 
                 assert len(rows) == 3
-                ids = {r["id"] for r in rows}
+                ids = {r.id for r in rows}
                 assert ids == {"1", "2", "3"}
 
             finally:
@@ -113,9 +139,9 @@ class TestExportView:
         dataset_name = f"export_filter_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello", "is_valid": True},
-            {"id": "2", "text": "World", "is_valid": False},
-            {"id": "3", "text": "Test", "is_valid": True},
+            {"id": "1", "text": "Hello", "is_valid": True, "_batch": "batch1"},
+            {"id": "2", "text": "World", "is_valid": False, "_batch": "batch1"},
+            {"id": "3", "text": "Test", "is_valid": True, "_batch": "batch1"},
         ]
 
         async with session.client("s3", **kwargs) as client:
@@ -125,7 +151,14 @@ class TestExportView:
                 await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
 
                 filter_ = BooleanFilter(field="is_valid", value=True)
-                view = FilterForExport(client, bucket, prefix, dataset_name, filter_)
+                view = FilterForExport(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    base_columns=["id", "text", "is_valid"],
+                    base_filter=filter_,
+                )
                 rows = []
                 async with view:
                     async for row in view:
@@ -133,7 +166,7 @@ class TestExportView:
 
                 assert len(rows) == 2
                 for row in rows:
-                    assert row["is_valid"] is True
+                    assert row.data["is_valid"] is True
 
             finally:
                 await client.delete_object(Bucket=bucket, Key=key)
@@ -147,15 +180,16 @@ class TestExportView:
         dataset_name = f"export_ann_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello"},
-            {"id": "2", "text": "World"},
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+            {"id": "2", "text": "World", "_batch": "batch1"},
+            {"id": "3", "text": "!", "_batch": "batch1"},
         ]
 
         annotation_rows = [
-            {"id": "1", "data": {"sentiment": "positive"}},
-            {"id": "2", "data": {"sentiment": "neutral"}},
+            {"id": "1", "is_valid": True, "details": {"label": "positive"}},
+            {"id": "2", "is_valid": False, "details": {"label": "neutral"}},
+            {"id": "3", "is_valid": True, "details": {"label": "positive"}},
         ]
-
         async with session.client("s3", **kwargs) as client:
             try:
                 ds_key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
@@ -163,21 +197,50 @@ class TestExportView:
                 await client.put_object(Bucket=bucket, Key=ds_key, Body=buf.read())
 
                 ann_key = f"{prefix}/{dataset_name}/annotations/sentiment/batch1/merged.parquet"
-                buf = create_parquet_buffer(annotation_rows)
+                buf = create_parquet_buffer(
+                    list(map(_transform_row_for_jsonl, annotation_rows))
+                )
                 await client.put_object(Bucket=bucket, Key=ann_key, Body=buf.read())
 
-                view = FilterForExport(client, bucket, prefix, dataset_name, None)
+                view = FilterForExport(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    base_columns=["id", "text"],
+                    annotator_columns={"sentiment": ["id", "is_valid", "details"]},
+                )
                 rows = []
                 async with view:
                     async for row in view:
                         rows.append(row)
 
-                assert len(rows) == 2
-                for row in rows:
-                    if row["id"] == "1":
-                        assert row.get("sentiment.sentiment") == "positive"
-                    elif row["id"] == "2":
-                        assert row.get("sentiment.sentiment") == "neutral"
+                assert len(rows) == 3
+
+                # Filtered based on annotation
+                filtered_view = FilterForExport(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    base_columns=["id", "text"],
+                    annotator_columns={"sentiment": ["id", "is_valid", "details"]},
+                    annotator_filters={
+                        "sentiment": BooleanFilter(field="is_valid", value=True)
+                    },
+                )
+                filtered_rows = []
+                async with filtered_view:
+                    async for row in filtered_view:
+                        filtered_rows.append(row)
+
+                assert len(filtered_rows) == 2
+
+                for row in filtered_rows:
+                    assert row.data["is_valid"] == True
+
+                    # Validate de-serialization of JSON-encoded fields
+                    assert row.data["details"]["label"] == "positive"
 
             finally:
                 await client.delete_object(Bucket=bucket, Key=ds_key)
@@ -201,7 +264,12 @@ class TestAnnotationView:
 
         async with session.client("s3", **kwargs) as client:
             view = FilterForAnnotation(
-                client, bucket, prefix, dataset_name, "test_annotator", None
+                client,
+                bucket,
+                prefix,
+                dataset_name,
+                "test_annotator",
+                base_columns=["id", "text"],
             )
             async with view:
                 assert view._lock is not None
@@ -219,10 +287,20 @@ class TestAnnotationView:
 
         async with session.client("s3", **kwargs) as client:
             view1 = FilterForAnnotation(
-                client, bucket, prefix, dataset_name, "test_annotator", None
+                client,
+                bucket,
+                prefix,
+                dataset_name,
+                "test_annotator",
+                base_columns=["id", "text"],
             )
             view2 = FilterForAnnotation(
-                client, bucket, prefix, dataset_name, "test_annotator", None
+                client,
+                bucket,
+                prefix,
+                dataset_name,
+                "test_annotator",
+                base_columns=["id", "text"],
             )
 
             async with view1:
@@ -240,7 +318,12 @@ class TestAnnotationView:
 
         async with session.client("s3", **kwargs) as client:
             view = FilterForAnnotation(
-                client, bucket, prefix, dataset_name, "test_annotator", None
+                client,
+                bucket,
+                prefix,
+                dataset_name,
+                "test_annotator",
+                base_columns=["id", "text"],
             )
 
             async def annotator(item: DataItem) -> Annotation:
@@ -258,8 +341,8 @@ class TestAnnotationView:
         dataset_name = f"ann_data_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello"},
-            {"id": "2", "text": "World"},
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+            {"id": "2", "text": "World", "_batch": "batch1"},
         ]
 
         async with session.client("s3", **kwargs) as client:
@@ -269,7 +352,12 @@ class TestAnnotationView:
                 await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
 
                 view = FilterForAnnotation(
-                    client, bucket, prefix, dataset_name, "test_annotator", None
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text", "_batch"],
                 )
 
                 call_count = 0
@@ -316,13 +404,13 @@ class TestAnnotationView:
         dataset_name = f"ann_skip_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello"},
-            {"id": "2", "text": "World"},
-            {"id": "3", "text": "Test"},
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+            {"id": "2", "text": "World", "_batch": "batch1"},
+            {"id": "3", "text": "Test", "_batch": "batch1"},
         ]
 
         existing_annotations = [
-            {"id": "1", "data": {"label": "existing"}},
+            _transform_row_for_jsonl({"id": "1", "data": {"label": "existing"}}),
         ]
 
         async with session.client("s3", **kwargs) as client:
@@ -336,7 +424,14 @@ class TestAnnotationView:
                 await client.put_object(Bucket=bucket, Key=ann_key, Body=buf.read())
 
                 view = FilterForAnnotation(
-                    client, bucket, prefix, dataset_name, "test_annotator", None
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text"],
+                    annotator_columns={"test_annotator": ["id", "data"]},
+                    annotator_filters={"test_annotator": AllFilter(filters=[])},
                 )
 
                 annotated_ids = []
@@ -372,9 +467,9 @@ class TestAnnotationView:
         dataset_name = f"ann_filter_test_{test_id}"
 
         dataset_rows = [
-            {"id": "1", "text": "Hello", "priority": True},
-            {"id": "2", "text": "World", "priority": False},
-            {"id": "3", "text": "Test", "priority": True},
+            {"id": "1", "text": "Hello", "priority": True, "_batch": "batch1"},
+            {"id": "2", "text": "World", "priority": False, "_batch": "batch1"},
+            {"id": "3", "text": "Test", "priority": True, "_batch": "batch1"},
         ]
 
         async with session.client("s3", **kwargs) as client:
@@ -385,7 +480,13 @@ class TestAnnotationView:
 
                 filter_ = BooleanFilter(field="priority", value=True)
                 view = FilterForAnnotation(
-                    client, bucket, prefix, dataset_name, "test_annotator", filter_
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text", "priority"],
+                    base_filter=filter_,
                 )
 
                 annotated_ids = []
@@ -423,7 +524,12 @@ class TestAnnotationView:
             await client.put_object(Bucket=bucket, Key=marker_key, Body=b"")
 
             view = FilterForAnnotation(
-                client, bucket, prefix, dataset_name, "test_annotator", None
+                client,
+                bucket,
+                prefix,
+                dataset_name,
+                "test_annotator",
+                base_columns=["id", "text"],
             )
 
             async def annotator(item: DataItem) -> Annotation:
@@ -434,3 +540,72 @@ class TestAnnotationView:
                     await view.annotate(annotator, batch="batch1")
 
             await client.delete_object(Bucket=bucket, Key=marker_key)
+
+
+class TestDeserializeJsonFields:
+    """Tests for _deserialize_json_fields function."""
+
+    def test_deserialize_dict_field(self):
+        """Test deserializing a dict field."""
+        from s3_data_tool.data_filtering import deserialize_json_fields
+
+        row = {"id": "1", "data": '{"key": "value"}', "text": '"Hello"'}
+        result = deserialize_json_fields(row)
+
+        assert result is not None
+        assert result["id"] == 1
+        assert result["data"] == {"key": "value"}
+        assert result["text"] == "Hello"
+
+    def test_deserialize_list_field(self):
+        """Test deserializing a list field."""
+        from s3_data_tool.data_filtering import deserialize_json_fields
+
+        row = {"id": "1", "tags": '["a", "b", "c"]', "text": '"Hello"'}
+        result = deserialize_json_fields(row)
+
+        assert result is not None
+        assert result["id"] == 1
+        assert result["tags"] == ["a", "b", "c"]
+        assert result["text"] == "Hello"
+
+    def test_deserialize_multiple_json_fields(self):
+        """Test deserializing multiple JSON fields."""
+        from s3_data_tool.data_filtering import deserialize_json_fields
+
+        row = {
+            "id": "1",
+            "data": '{"key": "value"}',
+            "tags": '["a", "b"]',
+            "text": '"Hello"',
+        }
+        result = deserialize_json_fields(row)
+
+        assert result is not None
+        assert result["data"] == {"key": "value"}
+        assert result["tags"] == ["a", "b"]
+        assert result["text"] == "Hello"
+
+    def test_deserialize_invalid_json_preserves_string(self):
+        """Test that invalid JSON string is preserved as-is."""
+        from s3_data_tool.data_filtering import deserialize_json_fields
+
+        row = {"id": "1", "data": "not valid json", "text": '"Hello"'}
+        result = deserialize_json_fields(row)
+
+        assert result is not None
+        assert result["id"] == 1
+        assert result["data"] == "not valid json"
+        assert result["text"] == "Hello"
+
+    def test_non_json_fields_preserved(self):
+        """Test that non-string fields are preserved."""
+        from s3_data_tool.data_filtering import deserialize_json_fields
+
+        row = {"id": "1", "count": 42, "active": True}
+        result = deserialize_json_fields(row)
+
+        assert result is not None
+        assert result["id"] == 1
+        assert result["count"] == 42
+        assert result["active"] is True

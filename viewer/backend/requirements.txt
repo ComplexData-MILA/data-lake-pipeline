@@ -1,0 +1,8 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+duckdb>=1.0.0
+pyarrow>=14.0.0
+aiobotocore[pyarrow]>=2.11.0
+aioboto3>=15.0.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0

@@ -1,4 +1,6 @@
+import json
 from collections.abc import AsyncIterator
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +11,7 @@ from .s3_utils import (
     generate_hex_id,
     upload_jsonl_chunk,
     upload_run_manifest,
+    transform_row_for_jsonl,
 )
 
 if TYPE_CHECKING:
@@ -47,7 +50,10 @@ class DatasetGenerator:
         chunk_idx = 0
 
         async for row in tqdm(iterator, ncols=80):
-            buffer.append(row)
+            row["_batch"] = batch
+            row["id"] = row.get("id", uuid.uuid4().hex)
+            transformed_row = transform_row_for_jsonl(row)
+            buffer.append(transformed_row)
             if len(buffer) >= streaming_configs.chunk_size:
                 key = f"{base_path}/{run_id}_chunk_{chunk_idx:05d}.jsonl"
                 await upload_jsonl_chunk(self._s3_client, self._bucket, key, buffer)
