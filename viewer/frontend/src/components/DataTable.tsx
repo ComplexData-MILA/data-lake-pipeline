@@ -24,6 +24,7 @@ export function DataTable() {
     pageSize,
     columns,
     annotators,
+    annotatorColumns,
     filters,
     sort,
     sortDir,
@@ -46,6 +47,7 @@ export function DataTable() {
         pageSize,
         columns: columns.length > 0 ? columns : ["id", "_batch"],
         annotators,
+        annotatorColumns,
         filters,
         sort,
         sortDir,
@@ -58,7 +60,7 @@ export function DataTable() {
       })
       .catch((err) => console.error("Failed to load data:", err))
       .finally(() => setLoading(false));
-  }, [dataset, page, pageSize, columns, annotators, filters, sort, sortDir]);
+  }, [dataset, page, pageSize, columns, annotators, annotatorColumns, filters, sort, sortDir]);
 
   const totalPages = Math.ceil(totalCount / pageSize);
   const startIdx = (page - 1) * pageSize + 1;

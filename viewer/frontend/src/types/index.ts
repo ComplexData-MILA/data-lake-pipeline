@@ -18,6 +18,7 @@ export interface SchemaResponse {
 export interface DataResponse {
   rows: Record<string, unknown>[];
   columns: string[];
+  annotator_columns: Record<string, string[]>;
 }
 
 export interface CountResponse {
@@ -50,6 +51,7 @@ export interface ViewerState {
   page: number;
   pageSize: number;
   annotators: string[];
+  annotatorColumns: Record<string, string[]>;
   columns: string[];
   filters: {
     base?: FilterSpec;
@@ -67,6 +69,7 @@ export const defaultState: ViewerState = {
   page: 1,
   pageSize: 50,
   annotators: [],
+  annotatorColumns: {},
   columns: [],
   filters: {
     base: undefined,

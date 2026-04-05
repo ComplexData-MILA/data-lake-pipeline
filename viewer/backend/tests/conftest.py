@@ -1,4 +1,5 @@
 """Pytest configuration and fixtures for viewer backend tests."""
+
 import io
 import os
 import uuid
@@ -7,7 +8,6 @@ import aioboto3
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -93,7 +93,7 @@ def create_parquet_buffer(rows: list[dict]) -> io.BytesIO:
 
 @pytest.fixture
 async def test_dataset(s3_client, s3_config, clean_bucket):
-    """Create a test dataset with parquet data and annotations."""
+    """Create a test dataset with 2 batches showing schema drift, and annotations."""
     client, session, kwargs = s3_client
     bucket = s3_config["bucket"]
     prefix = s3_config["prefix"]
@@ -101,29 +101,47 @@ async def test_dataset(s3_client, s3_config, clean_bucket):
     test_id = str(uuid.uuid4())[:8]
     dataset_name = f"test_dataset_{test_id}"
 
-    dataset_rows = [
+    batch1_rows = [
         {"id": "row1", "text": "Hello world", "value": 10, "_batch": "batch1"},
         {"id": "row2", "text": "我的拼好饭失踪了", "value": 20, "_batch": "batch1"},
-        {"id": "row3", "text": "Test text", "value": 30, "_batch": "batch1"},
     ]
 
-    annotation_rows = [
+    batch2_rows = [
+        {"id": "row3", "text": "Test text", "category": "A", "_batch": "batch2"},
+        {"id": "row4", "text": "Another row", "category": "B", "_batch": "batch2"},
+    ]
+
+    annotator1_batch1_rows = [
         {"id": "row1", "is_valid": True, "label": "positive"},
         {"id": "row2", "is_valid": False, "label": "negative"},
     ]
 
-    ds_key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
-    buf = create_parquet_buffer(dataset_rows)
-    await client.put_object(Bucket=bucket, Key=ds_key, Body=buf.read())
+    annotator1_batch2_rows = [
+        {"id": "row3", "label": "neutral", "notes": "good"},
+    ]
 
-    ann_key = f"{prefix}/{dataset_name}/annotations/annotator1/batch1/merged.parquet"
-    buf = create_parquet_buffer(annotation_rows)
-    await client.put_object(Bucket=bucket, Key=ann_key, Body=buf.read())
+    ds_key1 = f"{prefix}/{dataset_name}/batch1/merged.parquet"
+    buf = create_parquet_buffer(batch1_rows)
+    await client.put_object(Bucket=bucket, Key=ds_key1, Body=buf.read())
+
+    ds_key2 = f"{prefix}/{dataset_name}/batch2/merged.parquet"
+    buf = create_parquet_buffer(batch2_rows)
+    await client.put_object(Bucket=bucket, Key=ds_key2, Body=buf.read())
+
+    ann_key1 = f"{prefix}/{dataset_name}/annotations/annotator1/batch1/merged.parquet"
+    buf = create_parquet_buffer(annotator1_batch1_rows)
+    await client.put_object(Bucket=bucket, Key=ann_key1, Body=buf.read())
+
+    ann_key2 = f"{prefix}/{dataset_name}/annotations/annotator1/batch2/merged.parquet"
+    buf = create_parquet_buffer(annotator1_batch2_rows)
+    await client.put_object(Bucket=bucket, Key=ann_key2, Body=buf.read())
 
     yield {
         "dataset_name": dataset_name,
-        "rows": dataset_rows,
-        "annotations": annotation_rows,
+        "batch1_rows": batch1_rows,
+        "batch2_rows": batch2_rows,
+        "annotator1_batch1_rows": annotator1_batch1_rows,
+        "annotator1_batch2_rows": annotator1_batch2_rows,
         "client": client,
         "session": session,
         "kwargs": kwargs,
@@ -133,7 +151,9 @@ async def test_dataset(s3_client, s3_config, clean_bucket):
 
     paginator = client.get_paginator("list_objects_v2")
     keys_to_delete = []
-    async for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"):
+    async for page in paginator.paginate(
+        Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"
+    ):
         for obj in page.get("Contents", []):
             keys_to_delete.append(obj["Key"])
     for key in keys_to_delete:

@@ -23,6 +23,18 @@ export async function fetchAnnotators(dataset: string): Promise<string[]> {
   return data.annotators;
 }
 
+export async function fetchAnnotatorColumns(
+  dataset: string,
+  annotator: string
+): Promise<string[]> {
+  const res = await fetch(
+    `${API_BASE}/datasets/${dataset}/annotations/${annotator}/columns`
+  );
+  if (!res.ok) throw new Error("Failed to fetch annotator columns");
+  const data = await res.json();
+  return data.columns;
+}
+
 export async function fetchSchema(
   dataset: string,
   annotators: string[]
@@ -60,6 +72,7 @@ export interface FetchDataParams {
   pageSize: number;
   columns: string[];
   annotators: string[];
+  annotatorColumns?: Record<string, string[]>;
   filters: object;
   sort?: string;
   sortDir?: "asc" | "desc";
@@ -75,6 +88,9 @@ export async function fetchData(
   urlParams.set("columns", params.columns.join(","));
   if (params.annotators.length > 0) {
     urlParams.set("annotators", params.annotators.join(","));
+  }
+  if (params.annotatorColumns && Object.keys(params.annotatorColumns).length > 0) {
+    urlParams.set("annotator_columns", JSON.stringify(params.annotatorColumns));
   }
   urlParams.set("filters", JSON.stringify(params.filters));
   if (params.sort) {

@@ -38,6 +38,7 @@ interface ViewerStore extends ViewerState {
   setPage: (page: number) => void;
   setPageSize: (pageSize: number) => void;
   setAnnotators: (annotators: string[]) => void;
+  setAnnotatorColumns: (annotatorColumns: Record<string, string[]>) => void;
   setColumns: (columns: string[]) => void;
   setBaseFilter: (filter: FilterSpec | undefined) => void;
   setAnnotatorFilter: (annotator: string, filter: FilterSpec | undefined) => void;
@@ -68,6 +69,11 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   setAnnotators: (annotators) => {
     set({ annotators, page: 1 });
     updateUrl({ ...get(), annotators, page: 1 });
+  },
+
+  setAnnotatorColumns: (annotatorColumns) => {
+    set({ annotatorColumns, page: 1 });
+    updateUrl({ ...get(), annotatorColumns, page: 1 });
   },
 
   setColumns: (columns) => {

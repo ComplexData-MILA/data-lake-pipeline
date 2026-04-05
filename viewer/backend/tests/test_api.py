@@ -1,4 +1,5 @@
 """Integration tests for viewer backend API."""
+
 import json
 import os
 
@@ -7,11 +8,10 @@ import pytest
 from viewer.backend import duckdb_query
 from viewer.backend.main import (
     get_s3_client,
-    list_datasets_from_s3,
-    list_annotators_from_s3,
     get_schema_with_types,
+    list_annotators_from_s3,
+    list_datasets_from_s3,
 )
-
 
 pytestmark = pytest.mark.integration
 
@@ -37,7 +37,7 @@ class TestDuckDBQuery:
         query = f"SELECT id, text FROM read_parquet('{base_path}') LIMIT 10"
 
         rows = duckdb_query.execute_query(query)
-        assert len(rows) == 3
+        assert len(rows) == 4
         assert all("id" in row and "text" in row for row in rows)
 
     @pytest.mark.asyncio
@@ -59,7 +59,7 @@ class TestDuckDBQuery:
         """Test build_query creates correct query structure."""
         filters = duckdb_query.FilterSpec()
 
-        query, columns = duckdb_query.build_query(
+        query, columns, annotator_columns = duckdb_query.build_query(
             dataset_name="test_ds",
             columns=["id", "text"],
             annotators=[],
@@ -70,24 +70,27 @@ class TestDuckDBQuery:
 
         assert "WITH" in query
         assert "SELECT" in query
-        assert "id" in columns
+        assert "text" in columns
 
     @pytest.mark.asyncio
     async def test_build_query_with_annotators(self):
         """Test build_query with annotator joins."""
         filters = duckdb_query.FilterSpec()
 
-        query, columns = duckdb_query.build_query(
+        query, columns, annotator_columns = duckdb_query.build_query(
             dataset_name="test_ds",
             columns=["id", "text"],
             annotators=["annotator1"],
+            annotator_columns={"annotator1": ["label", "is_valid"]},
             filters=filters,
             offset=0,
             limit=50,
         )
 
         assert "annotator1" in query
-        assert "annotator1" in columns
+        assert "annotator1.label" in query
+        assert "text" in columns
+        assert "annotator1" in annotator_columns
 
     @pytest.mark.asyncio
     async def test_build_count_query(self):
@@ -98,6 +101,7 @@ class TestDuckDBQuery:
             dataset_name="test_ds",
             annotators=[],
             filters=filters,
+            annotator_columns={},
         )
 
         assert "SELECT COUNT" in query
@@ -112,6 +116,7 @@ class TestDuckDBQuery:
             dataset_name="test_ds",
             annotators=[],
             filters=filters,
+            annotator_columns={},
         )
 
         assert "WHERE" in query
@@ -176,40 +181,40 @@ class TestAPIEndpoints:
     def client(self):
         """Create FastAPI test client."""
         from fastapi.testclient import TestClient
+
         from viewer.backend.main import app
+
         return TestClient(app)
 
     def test_get_datasets_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets endpoint."""
-        response = client.get("/api/datasets")
+        """Test GET /datasets endpoint."""
+        response = client.get("/datasets")
         assert response.status_code == 200
         data = response.json()
         assert "datasets" in data
         assert test_dataset["dataset_name"] in data["datasets"]
 
     def test_get_annotations_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets/{dataset_name}/annotations endpoint."""
+        """Test GET /datasets/{dataset_name}/annotations endpoint."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/annotations")
+        response = client.get(f"/datasets/{dataset_name}/annotations")
         assert response.status_code == 200
         data = response.json()
         assert "annotators" in data
         assert "annotator1" in data["annotators"]
 
     def test_get_schema_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets/{dataset_name}/schema endpoint."""
+        """Test GET /datasets/{dataset_name}/schema endpoint."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/schema?annotators=annotator1")
+        response = client.get(f"/datasets/{dataset_name}/schema")
         assert response.status_code == 200
         data = response.json()
         assert "columns" in data
-        # Note: wildcard path /*/merged.parquet doesn't work with PRAGMA table_info
-        # Returns empty list but endpoint works
 
     def test_get_count_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets/{dataset_name}/count endpoint."""
+        """Test GET /datasets/{dataset_name}/count endpoint."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/count")
+        response = client.get(f"/datasets/{dataset_name}/count")
         assert response.status_code == 200
         data = response.json()
         assert "count" in data
@@ -218,18 +223,16 @@ class TestAPIEndpoints:
     def test_get_count_with_filters(self, client, test_dataset):
         """Test count endpoint with filter specification."""
         dataset_name = test_dataset["dataset_name"]
-        filters = json.dumps({"base": {"field": "value", "op": "gt", "value": 15}})
-        response = client.get(
-            f"/api/datasets/{dataset_name}/count?filters={filters}"
-        )
+        filters = json.dumps({"base": {"field": "text", "op": "contains", "value": "world"}})
+        response = client.get(f"/datasets/{dataset_name}/count?filters={filters}")
         assert response.status_code == 200
         data = response.json()
-        assert data["count"] == 2
+        assert data["count"] == 1
 
     def test_get_data_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets/{dataset_name}/data endpoint."""
+        """Test GET /datasets/{dataset_name}/data endpoint."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/data?page=1&page_size=10")
+        response = client.get(f"/datasets/{dataset_name}/data?page=1&page_size=10")
         assert response.status_code == 200
         data = response.json()
         assert "rows" in data
@@ -240,7 +243,7 @@ class TestAPIEndpoints:
         """Test data endpoint with specific columns."""
         dataset_name = test_dataset["dataset_name"]
         response = client.get(
-            f"/api/datasets/{dataset_name}/data?columns=id,text&page_size=10"
+            f"/datasets/{dataset_name}/data?columns=id,text&page_size=10"
         )
         assert response.status_code == 200
         data = response.json()
@@ -248,22 +251,69 @@ class TestAPIEndpoints:
         assert "text" in data["columns"]
 
     def test_get_data_with_annotators(self, client, test_dataset):
-        """Test data endpoint with annotator joins."""
+        """Test data endpoint with annotator joins and explicit columns."""
         dataset_name = test_dataset["dataset_name"]
-        # Note: Due to wildcard path limitation, this may fail in test environment
-        # but works with actual parquet files in production
         response = client.get(
-            f"/api/datasets/{dataset_name}/data?annotators=annotator1&page_size=10"
+            f"/datasets/{dataset_name}/data?annotators=annotator1&annotator_columns=%7B%22annotator1%22:%5B%22label%22%5D%7D&page_size=10"
         )
-        # Accept either success or error due to DuckDB wildcard path issue
-        assert response.status_code in [200, 500]
+        assert response.status_code == 200
+        data = response.json()
+        assert "annotator_columns" in data
+        assert "annotator1" in data["annotator_columns"]
+
+    def test_annotator_columns_endpoint(self, client, test_dataset):
+        """Test getting annotator column names."""
+        dataset_name = test_dataset["dataset_name"]
+        response = client.get(
+            f"/datasets/{dataset_name}/annotations/annotator1/columns"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "columns" in data
+        columns = data["columns"]
+        assert "label" in columns
+        assert "notes" in columns
+        assert "is_valid" in columns
+
+    def test_schema_drift_base(self, client, test_dataset):
+        """Test data endpoint handles base dataset schema drift."""
+        dataset_name = test_dataset["dataset_name"]
+        response = client.get(
+            f"/datasets/{dataset_name}/data?columns=id,_batch,text,value,category&page_size=10"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["rows"]) == 4
+        for row in data["rows"]:
+            if row["_batch"] == "batch1":
+                assert "value" in row
+                assert row.get("category") is None
+            elif row["_batch"] == "batch2":
+                assert "category" in row
+                assert row.get("value") is None
+
+    def test_schema_drift_annotator(self, client, test_dataset):
+        """Test data endpoint handles annotator schema drift."""
+        dataset_name = test_dataset["dataset_name"]
+        response = client.get(
+            f"/datasets/{dataset_name}/data?annotators=annotator1&annotator_columns=%7B%22annotator1%22:%5B%22label%22,%22is_valid%22,%22notes%22%5D%7D&page_size=10"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        for row in data["rows"]:
+            if row["id"] in ["row1", "row2"]:
+                assert "is_valid" in row
+                assert "label" in row
+                assert row.get("notes") is None
+            elif row["id"] == "row3":
+                assert "label" in row
+                assert "notes" in row
+                assert row.get("is_valid") is None
 
     def test_get_data_pagination(self, client, test_dataset):
         """Test data endpoint pagination."""
         dataset_name = test_dataset["dataset_name"]
-        response1 = client.get(
-            f"/api/datasets/{dataset_name}/data?page=1&page_size=1"
-        )
+        response1 = client.get(f"/datasets/{dataset_name}/data?page=1&page_size=1")
         assert response1.status_code == 200
         data1 = response1.json()
         assert len(data1["rows"]) == 1
@@ -273,14 +323,14 @@ class TestAPIEndpoints:
         dataset_name = test_dataset["dataset_name"]
         # Note: sort on non-existent column may fail - just check endpoint doesn't crash
         response = client.get(
-            f"/api/datasets/{dataset_name}/data?sort=value&sort_dir=desc&page_size=10"
+            f"/datasets/{dataset_name}/data?sort=value&sort_dir=desc&page_size=10"
         )
-        assert response.status_code in [200, 500]
+        assert response.status_code == 200
 
     def test_get_row_endpoint(self, client, test_dataset):
-        """Test GET /api/datasets/{dataset_name}/row/{row_id} endpoint."""
+        """Test GET /datasets/{dataset_name}/row/{row_id} endpoint."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/row/row1")
+        response = client.get(f"/datasets/{dataset_name}/row/row1")
         assert response.status_code == 200
         data = response.json()
         assert "row" in data
@@ -289,7 +339,7 @@ class TestAPIEndpoints:
     def test_get_row_not_found(self, client, test_dataset):
         """Test row endpoint with non-existent ID."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/row/nonexistent")
+        response = client.get(f"/datasets/{dataset_name}/row/nonexistent")
         assert response.status_code == 404
 
 
@@ -300,35 +350,31 @@ class TestAPIEdgeCases:
     def client(self):
         """Create FastAPI test client."""
         from fastapi.testclient import TestClient
+
         from viewer.backend.main import app
+
         return TestClient(app)
 
     def test_schema_empty_annotators(self, client, test_dataset):
         """Test schema with no annotators."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/api/datasets/{dataset_name}/schema")
+        response = client.get(f"/datasets/{dataset_name}/schema")
         assert response.status_code == 200
 
     def test_data_invalid_filters(self, client, test_dataset):
         """Test data endpoint with invalid JSON filters."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(
-            f"/api/datasets/{dataset_name}/data?filters=invalid"
-        )
+        response = client.get(f"/datasets/{dataset_name}/data?filters=invalid")
         assert response.status_code == 200
 
     def test_data_invalid_page(self, client, test_dataset):
         """Test data endpoint with invalid page parameters."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(
-            f"/api/datasets/{dataset_name}/data?page=0&page_size=10"
-        )
+        response = client.get(f"/datasets/{dataset_name}/data?page=0&page_size=10")
         assert response.status_code == 422
 
     def test_data_page_size_limit(self, client, test_dataset):
         """Test data endpoint page size limit."""
         dataset_name = test_dataset["dataset_name"]
-        response = client.get(
-            f"/api/datasets/{dataset_name}/data?page_size=2000"
-        )
+        response = client.get(f"/datasets/{dataset_name}/data?page_size=2000")
         assert response.status_code == 422

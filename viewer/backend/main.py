@@ -1,4 +1,5 @@
 """FastAPI backend for data viewer."""
+
 import json
 import logging
 import os
@@ -6,20 +7,20 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from duckdb_query import (
-    FilterSpec,
-    build_query,
-    build_count_query,
-    execute_query,
-    S3_BUCKET,
-    S3_PREFIX,
-    S3_ENDPOINT_URL,
     S3_ACCESS_KEY,
+    S3_BUCKET,
+    S3_ENDPOINT_URL,
+    S3_PREFIX,
     S3_SECRET_KEY,
+    FilterSpec,
+    build_count_query,
+    build_query,
+    execute_query,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +33,11 @@ def get_s3_client():
     """Get or create the S3 client."""
     global s3_client
     if s3_client is None:
-        endpoint = S3_ENDPOINT_URL.removeprefix("https://").rstrip("/") if S3_ENDPOINT_URL.startswith("https://") else S3_ENDPOINT_URL.lstrip("https://")
+        endpoint = (
+            S3_ENDPOINT_URL.removeprefix("https://").rstrip("/")
+            if S3_ENDPOINT_URL.startswith("https://")
+            else S3_ENDPOINT_URL.lstrip("https://")
+        )
         use_ssl = S3_ENDPOINT_URL.startswith("https://")
         config = BotoConfig(
             s3={"addressing_style": "path"},
@@ -79,6 +84,7 @@ class SchemaResponse(BaseModel):
 class DataResponse(BaseModel):
     rows: list[dict[str, Any]]
     columns: list[str]
+    annotator_columns: dict[str, list[str]] = {}
 
 
 class CountResponse(BaseModel):
@@ -112,7 +118,9 @@ def list_annotators_from_s3(dataset_name: str) -> list[str]:
     annotations_prefix = f"{S3_PREFIX}/{dataset_name}/annotations/"
 
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=annotations_prefix, Delimiter="/"):
+    for page in paginator.paginate(
+        Bucket=S3_BUCKET, Prefix=annotations_prefix, Delimiter="/"
+    ):
         for cp in page.get("CommonPrefixes", []):
             if (p := cp.get("Prefix")) is not None:
                 annotator_name = p.rstrip("/").split("/")[-1]
@@ -120,33 +128,33 @@ def list_annotators_from_s3(dataset_name: str) -> list[str]:
     return sorted(annotators)
 
 
-def get_schema_with_types(dataset_name: str, annotators: list[str]) -> list[SchemaColumn]:
+def get_schema_with_types(
+    dataset_name: str, annotators: list[str]
+) -> list[SchemaColumn]:
     """Get combined schema from dataset and annotators."""
     columns: dict[str, str] = {}
 
     base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
-    query = f"PRAGMA table_info('read_parquet(\"{base_path}\")')"
+    query = f"SELECT * FROM read_parquet('{base_path}', union_by_name=true) LIMIT 1"
 
     try:
         results = execute_query(query)
-        for row in results:
-            col_name = row.get("name", "")
-            col_type = row.get("type", "unknown")
-            if col_name and col_name not in columns:
-                columns[col_name] = col_type
+        if results:
+            for col_name in results[0].keys():
+                if col_name and col_name not in columns:
+                    columns[col_name] = "unknown"
     except Exception as e:
         logger.warning(f"Failed to get schema from base: {e}")
 
     for annotator in annotators:
         annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
-        query = f"PRAGMA table_info('read_parquet(\"{annot_path}\")')"
+        query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
         try:
             results = execute_query(query)
-            for row in results:
-                col_name = row.get("name", "")
-                col_type = row.get("type", "unknown")
-                if col_name and col_name not in ["id", "_batch"]:
-                    columns[f"{annotator}.{col_name}"] = col_type
+            if results:
+                for col_name in results[0].keys():
+                    if col_name and col_name not in ["id", "_batch"]:
+                        columns[f"{annotator}.{col_name}"] = "unknown"
         except Exception as e:
             logger.warning(f"Failed to get schema from annotator {annotator}: {e}")
 
@@ -167,6 +175,25 @@ async def get_annotations(dataset_name: str):
     return AnnotationListResponse(annotators=annotators)
 
 
+@app.get("/datasets/{dataset_name}/annotations/{annotator}/columns")
+async def get_annotator_columns(dataset_name: str, annotator: str):
+    """Get available column names for a specific annotator (union across all batches)."""
+    annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
+    query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 100"
+    try:
+        results = execute_query(query)
+        if results:
+            columns = set()
+            for row in results:
+                for k in row.keys():
+                    if k not in ["id", "_batch"]:
+                        columns.add(k)
+            return {"columns": sorted(columns)}
+    except Exception as e:
+        logger.error(f"Failed to get annotator columns: {e}")
+    raise HTTPException(status_code=404, detail="Annotator not found")
+
+
 @app.get("/datasets/{dataset_name}/schema", response_model=SchemaResponse)
 async def get_schema(
     dataset_name: str,
@@ -182,17 +209,22 @@ async def get_schema(
 async def get_count(
     dataset_name: str,
     annotators: str = Query(default="", description="Comma-separated annotator names"),
+    annotator_columns: str = Query(default="{}", description="JSON dict mapping annotator to column names"),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
 ):
     """Get approximate row count."""
     annotator_list = [a.strip() for a in annotators.split(",") if a.strip()]
+    try:
+        annotator_cols = json.loads(annotator_columns) if annotator_columns else {}
+    except json.JSONDecodeError:
+        annotator_cols = {}
     try:
         filter_data = json.loads(filters) if filters else {}
     except json.JSONDecodeError:
         filter_data = {}
 
     filter_spec = FilterSpec(filter_data)
-    query = build_count_query(dataset_name, annotator_list, filter_spec)
+    query = build_count_query(dataset_name, annotator_list, filter_spec, annotator_cols)
 
     try:
         results = execute_query(query)
@@ -210,6 +242,7 @@ async def get_data(
     page_size: int = Query(default=50, ge=1, le=1000),
     columns: str = Query(default="", description="Comma-separated column names"),
     annotators: str = Query(default="", description="Comma-separated annotator names"),
+    annotator_columns: str = Query(default="{}", description="JSON dict mapping annotator to column names"),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
     sort: str | None = Query(default=None),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
@@ -217,6 +250,10 @@ async def get_data(
     """Get paginated data rows."""
     column_list = [c.strip() for c in columns.split(",") if c.strip()]
     annotator_list = [a.strip() for a in annotators.split(",") if a.strip()]
+    try:
+        annotator_cols = json.loads(annotator_columns) if annotator_columns else {}
+    except json.JSONDecodeError:
+        annotator_cols = {}
 
     if not column_list:
         column_list = ["id", "_batch"]
@@ -229,11 +266,12 @@ async def get_data(
     filter_spec = FilterSpec(filter_data)
     offset = (page - 1) * page_size
 
-    query, selected_columns = build_query(
+    query, selected_columns, selected_annotator_columns = build_query(
         dataset_name,
         column_list,
         annotator_list,
         filter_spec,
+        annotator_cols,
         sort,
         sort_dir,
         offset,
@@ -242,7 +280,11 @@ async def get_data(
 
     try:
         rows = execute_query(query)
-        return DataResponse(rows=rows, columns=selected_columns)
+        return DataResponse(
+            rows=rows,
+            columns=selected_columns,
+            annotator_columns=selected_annotator_columns,
+        )
     except Exception as e:
         logger.error(f"Data query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -252,7 +294,7 @@ async def get_data(
 async def get_row(dataset_name: str, row_id: str):
     """Get a single row by ID."""
     base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
-    query = f"SELECT * FROM read_parquet('{base_path}') WHERE id = '{row_id}' LIMIT 1"
+    query = f"SELECT * FROM read_parquet('{base_path}', union_by_name=true) WHERE id = '{row_id}' LIMIT 1"
 
     try:
         rows = execute_query(query)
