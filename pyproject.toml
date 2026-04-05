@@ -1,9 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "s3-dataset-tools"
+name = "s3_data_tool"
 version = "0.1.0"
 description = "Minimalistic async library for creating and filter/map on text datasets stored in S3."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "websockets>=16.0",
+    "aioboto3>=13.0",
+    "duckdb>=1.0",
+    "pyarrow>=18.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "tqdm>=4.67.3",
+    "pydantic>=2.0",
+    "pandas>=2.0",
+    "types-aiobotocore[s3]>=2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+s3_data_tool-clean-up = "s3_data_tool.clean_up:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["s3_data_tool"]
+
+[dependency-groups]
+dev = [
+    "black>=26.3.1",
+    "isort>=8.0.1",
 ]

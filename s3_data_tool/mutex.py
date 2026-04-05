@@ -2,16 +2,22 @@ import asyncio
 import json
 import time
 import uuid
+from os import environ
+import logging
+
 from websockets.asyncio.client import connect
 
 
 class WSSMutex:
-    def __init__(self, base_url: str, lock_name: str):
-        self.url = f"{base_url.rstrip('/')}/ws/{lock_name}" # TODO: read env var instead.
-        self.client_id = f"simple-{uuid.uuid4()}"
+    def __init__(self, lock_name: str, base_url: str | None = None):
+        if not base_url:
+            base_url = environ["WSS_MUTEX_BASE_URL"]
+        self.url = f"{base_url.rstrip('/')}/ws/{lock_name}"
+        self.client_id = uuid.uuid4()
         self.ws = None
         self._acquired_at = None
         self._ttl_ms = None
+        self.logger = logging.getLogger(__name__)
 
     async def connect(self):
         """Establishes WS connection and performs handshake."""
@@ -23,7 +29,9 @@ class WSSMutex:
             raise Exception("Handshake failed")
 
         # 2. Send Client Hello
-        await self.ws.send(json.dumps({"type": "hello", "clientId": self.client_id}))
+        await self.ws.send(
+            json.dumps({"type": "hello", "clientId": str(self.client_id)})
+        )
 
     async def acquire(self, ttl_ms: int = 10_000) -> None:
         """Acquires the lock, retrying automatically if busy."""
@@ -39,6 +47,7 @@ class WSSMutex:
             if msg["type"] == "granted":
                 self._acquired_at = time.monotonic()
                 self._ttl_ms = ttl_ms
+                return
 
             elif msg["type"] == "busy":
                 # Simplified: Just wait 1 second and retry
@@ -52,20 +61,9 @@ class WSSMutex:
         if not self.ws:
             return
 
-        if self._acquired_at and self._ttl_ms:
-            elapsed_ms = (time.monotonic() - self._acquired_at) * 1000
-            if elapsed_ms > self._ttl_ms:
-                print(
-                    f"Warning: Lock was not released in time (expired {int(elapsed_ms - self._ttl_ms)} ms ago)"
-                )
-
         await self.ws.send(json.dumps({"type": "release"}))
-
-        msg = json.loads(await self.ws.recv())
-        if msg["type"] != "released":
-            print(f"Warning: unexpected release response {msg}")
-
         await self.ws.close()
+        self.ws = None
 
     async def __aenter__(self):
         await self.acquire()
