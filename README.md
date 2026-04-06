@@ -1,6 +1,6 @@
 # Distributed S3 Dataset Tool
 
-Library for creating and annotating text-heavy datasets. This library uses S3 and parquet as storage backends, and supports a distributed- dataset created on one server might be annotated on another.
+Library for creating and annotating text-heavy datasets. This library uses S3 and parquet as storage backends, and supports a distributed computing setup- dataset created on one server might be annotated on another.
 
 ## Design Choices
 
@@ -108,7 +108,7 @@ If the annotation function raises an Error, that particular data row should be s
 Create a cronjob for the clean-up script:
 
 ```bash
-uv run --env-file .env s3_data_tool.clean-up
+uv run --env-file .env s3-data-tool-clean-up
 ```
 
 The clean-up job merges all JSONL files into parquet tables. This is the only place where merging occurs - data generation workers leave JSONL files as output, and the clean-up job consolidates them.

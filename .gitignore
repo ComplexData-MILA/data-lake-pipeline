@@ -12,6 +12,7 @@ uv.lock
 
 # Secrets
 .env
+.prod.env
 
 # Viewer - Python backend
 viewer/backend/.venv/
