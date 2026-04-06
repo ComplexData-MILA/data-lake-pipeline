@@ -33,11 +33,6 @@ def get_s3_client():
     """Get or create the S3 client."""
     global s3_client
     if s3_client is None:
-        endpoint = (
-            S3_ENDPOINT_URL.removeprefix("https://").rstrip("/")
-            if S3_ENDPOINT_URL.startswith("https://")
-            else S3_ENDPOINT_URL.lstrip("https://")
-        )
         use_ssl = S3_ENDPOINT_URL.startswith("https://")
         config = BotoConfig(
             s3={"addressing_style": "path"},
@@ -144,7 +139,9 @@ def get_schema_with_types(
 
     for annotator in annotators:
         annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
-        query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
+        query = (
+            f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
+        )
         try:
             results = execute_query(query)
             if results:
@@ -205,7 +202,9 @@ async def get_schema(
 async def get_count(
     dataset_name: str,
     annotators: str = Query(default="", description="Comma-separated annotator names"),
-    annotator_columns: str = Query(default="{}", description="JSON dict mapping annotator to column names"),
+    annotator_columns: str = Query(
+        default="{}", description="JSON dict mapping annotator to column names"
+    ),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
 ):
     """Get approximate row count."""
@@ -238,7 +237,9 @@ async def get_data(
     page_size: int = Query(default=50, ge=1, le=1000),
     columns: str = Query(default="", description="Comma-separated column names"),
     annotators: str = Query(default="", description="Comma-separated annotator names"),
-    annotator_columns: str = Query(default="{}", description="JSON dict mapping annotator to column names"),
+    annotator_columns: str = Query(
+        default="{}", description="JSON dict mapping annotator to column names"
+    ),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
     sort: str | None = Query(default=None),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
@@ -294,4 +295,4 @@ async def get_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 
+#

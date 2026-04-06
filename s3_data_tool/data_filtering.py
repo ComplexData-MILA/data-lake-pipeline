@@ -269,6 +269,7 @@ class FilterForExport:
         try:
             s3_endpoint = os.environ["S3_ENDPOINT_URL"]
             endpoint_host = s3_endpoint.removeprefix("https://").rstrip("/")
+            endpoint_host = endpoint_host.removeprefix("http://").rstrip("/")
             use_ssl = s3_endpoint.startswith("https://")
 
             conn.execute(
