@@ -26,6 +26,7 @@ S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 
 def _get_s3_settings() -> dict[str, str]:
     endpoint_host = S3_ENDPOINT_URL.removeprefix("https://").rstrip("/")
+    endpoint_host = endpoint_host.removeprefix("http://").rstrip("/")
     use_ssl = "true" if S3_ENDPOINT_URL.startswith("https://") else "false"
     return {
         "endpoint": endpoint_host,
@@ -223,13 +224,15 @@ def execute_query(query: str) -> list[dict[str, Any]]:
     conn = duckdb.connect(db_path, read_only=False)
 
     s3_settings = _get_s3_settings()
-    conn.execute(f"""
+    conn.execute(
+        f"""
         SET s3_access_key_id='{S3_ACCESS_KEY}';
         SET s3_secret_access_key='{S3_SECRET_KEY}';
         SET s3_endpoint='{s3_settings['endpoint']}';
         SET s3_use_ssl={s3_settings['use_ssl']};
         SET s3_url_style='path';
-    """)
+    """
+    )
 
     try:
         result = conn.execute(query)
