@@ -112,11 +112,11 @@ def build_query(
     base_where_clause = f" WHERE {base_where}" if base_where else ""
 
     base_cols = [c for c in columns if c != "id" and c != "_batch"]
-    select_parts = ["base.id", "base._batch"]
+    select_parts = ["id", "_batch"]
     for col in base_cols:
-        select_parts.append(f"ANY_VALUE(base.{col}) AS {col}")
+        select_parts.append(f"ANY_VALUE({col}) AS {col}")
     ctes.append(
-        f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY base.id, base._batch)"
+        f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
     )
 
     joined_annotators = []
