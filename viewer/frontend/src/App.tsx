@@ -7,7 +7,8 @@ import { DataTable } from "@/components/DataTable";
 import { RowDetailModal } from "@/components/RowDetailModal";
 import { useViewerStore } from "@/hooks/useUrlState";
 import { Button } from "@/components/ui/button";
-import { Database, RefreshCw } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { RefreshCw } from "lucide-react";
 
 export function App() {
   const { dataset, reset } = useViewerStore();
@@ -20,33 +21,27 @@ export function App() {
   }, [dataset]);
 
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b bg-card">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              <Database className="h-6 w-6" />
-              <h1 className="text-xl font-bold">S3 Data Viewer</h1>
-            </div>
-            <DatasetSelector onOpenChange={setDatasetDialogOpen} />
-          </div>
+    <div className="container mx-auto py-8 px-4">
+      <h1 className="text-3xl font-bold mb-2">S3 Data Viewer</h1>
+      <p className="text-muted-foreground mb-6">Browse and filter your S3-hosted dataset</p>
 
-          {dataset && (
-            <div className="mt-4 flex flex-wrap items-center gap-4">
-              <div className="flex items-center gap-2 ml-auto">
-                <ColumnConfigurator />
-                <FilterPanel />
-                <Button variant="ghost" size="sm" onClick={reset} className="gap-1">
-                  <RefreshCw className="h-4 w-4" />
-                  <span className="hidden sm:inline">Reset</span>
-                </Button>
-              </div>
+      {dataset && (
+        <Card className="w-full mb-6">
+          <CardContent className="pt-6">
+            <div className="flex flex-wrap items-center gap-4">
+              <DatasetSelector onOpenChange={setDatasetDialogOpen} />
+              <ColumnConfigurator />
+              <FilterPanel />
+              <Button variant="ghost" size="sm" onClick={reset} className="gap-1 ml-auto">
+                <RefreshCw className="h-4 w-4" />
+                <span className="hidden sm:inline">Reset</span>
+              </Button>
             </div>
-          )}
-        </div>
-      </header>
+          </CardContent>
+        </Card>
+      )}
 
-      <main className="w-full px-4 py-6">
+      <main className="w-full">
         <DataTable />
       </main>
 

@@ -280,7 +280,7 @@ export function DataTable() {
   if (loading && rows.length === 0) {
     return (
       <div className="space-y-4">
-        <div className="rounded-md border">
+        <div>
           <Table>
             <TableHeader>
               <TableRow>
@@ -313,7 +313,7 @@ export function DataTable() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-md border">
+      <div>
         <Table>
           <TableHeader>
             <TableRow>

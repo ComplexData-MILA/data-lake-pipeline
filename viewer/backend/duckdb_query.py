@@ -175,15 +175,16 @@ def build_query(
         join_parts = [f"LEFT JOIN {ann} USING (id)" for ann in joined_annotators]
         join_clause = " " + " ".join(join_parts)
 
-    order_clause = ""
+    order_clause = " ORDER BY base.id ASC"
     if sort:
         available_base_cols = set(base_cols)
         if sort == "_batch" or sort in available_base_cols:
             direction = "DESC" if sort_dir == "desc" else "ASC"
+            # When sorting by another column, add id as secondary sort for determinism
             order_clause = (
-                f" ORDER BY base.{sort} {direction}"
+                f" ORDER BY base.{sort} {direction}, base.id ASC"
                 if sort != "_batch"
-                else f" ORDER BY base._batch {direction}"
+                else f" ORDER BY base._batch {direction}, base.id ASC"
             )
 
     query = f"WITH {', '.join(ctes)} SELECT {', '.join(select_cols)} FROM base{join_clause}{order_clause} LIMIT {limit} OFFSET {offset}"

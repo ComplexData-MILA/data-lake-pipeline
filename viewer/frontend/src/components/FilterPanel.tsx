@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { fetchSchema, fetchAnnotators } from "@/lib/api";
+import { useState, useEffect, useRef } from "react";
+import { fetchSchema, fetchAnnotators, fetchAnnotatorColumns } from "@/lib/api";
 import { useViewerStore } from "@/hooks/useUrlState";
 import {
   Dialog,
@@ -112,6 +112,8 @@ export function FilterPanel() {
   const [loading, setLoading] = useState(false);
   const [schemaColumns, setSchemaColumns] = useState<string[]>([]);
   const [annotators, setAnnotators] = useState<string[]>([]);
+  const [annotatorColumnOptions, setAnnotatorColumnOptions] = useState<Record<string, string[]>>({});
+  const loadedAnnotatorsRef = useRef<Set<string>>(new Set());
   const { dataset, baseColumns, filters, setBaseFilter, setAnnotatorFilter, resetFilters } =
     useViewerStore();
 
@@ -122,9 +124,31 @@ export function FilterPanel() {
       fetchSchema(dataset, []),
       fetchAnnotators(dataset),
     ])
-      .then(([schemaRes, annotatorsRes]) => {
+      .then(async ([schemaRes, annotatorsRes]) => {
         setSchemaColumns(schemaRes.columns.map((c) => c.name));
         setAnnotators(annotatorsRes);
+
+        // Fetch columns for each annotator
+        const columnPromises = annotatorsRes.map(async (ann) => {
+          if (loadedAnnotatorsRef.current.has(ann)) {
+            return { annotator: ann, columns: annotatorColumnOptions[ann] || [] };
+          }
+          try {
+            const columns = await fetchAnnotatorColumns(dataset, ann);
+            loadedAnnotatorsRef.current.add(ann);
+            return { annotator: ann, columns };
+          } catch (err) {
+            console.error(`Failed to load columns for ${ann}:`, err);
+            return { annotator: ann, columns: [] };
+          }
+        });
+
+        const results = await Promise.all(columnPromises);
+        const newAnnotatorColumns: Record<string, string[]> = {};
+        for (const result of results) {
+          newAnnotatorColumns[result.annotator] = result.columns;
+        }
+        setAnnotatorColumnOptions(newAnnotatorColumns);
       })
       .catch((err) => console.error("Failed to load filter options:", err))
       .finally(() => setLoading(false));
@@ -201,9 +225,7 @@ export function FilterPanel() {
             </TabsContent>
 
             {annotators.map((ann) => {
-              const annColumns = schemaColumns
-                .filter((col: string) => col.startsWith(`${ann}.`))
-                .map((col: string) => col.replace(`${ann}.`, ""));
+              const annColumns = annotatorColumnOptions[ann] || [];
               return (
                 <TabsContent key={ann} value={ann} className="space-y-4 mt-4">
                   {filters.annotators[ann] ? (
