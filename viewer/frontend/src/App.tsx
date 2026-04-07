@@ -1,4 +1,6 @@
+import { useState, useEffect } from "react";
 import { DatasetSelector } from "@/components/DatasetSelector";
+import { DatasetSelectionDialog } from "@/components/DatasetSelectionDialog";
 import { AnnotatorSelector } from "@/components/AnnotatorSelector";
 import { ColumnSelector } from "@/components/ColumnSelector";
 import { FilterPanel } from "@/components/FilterPanel";
@@ -10,6 +12,13 @@ import { Database, RefreshCw } from "lucide-react";
 
 export function App() {
   const { dataset, reset } = useViewerStore();
+  const [datasetDialogOpen, setDatasetDialogOpen] = useState(false);
+
+  useEffect(() => {
+    if (!dataset) {
+      setDatasetDialogOpen(true);
+    }
+  }, [dataset]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -20,9 +29,9 @@ export function App() {
               <Database className="h-6 w-6" />
               <h1 className="text-xl font-bold">S3 Data Viewer</h1>
             </div>
-            <DatasetSelector />
+            <DatasetSelector onOpenChange={setDatasetDialogOpen} />
           </div>
-          
+
           {dataset && (
             <div className="mt-4 flex flex-wrap items-center gap-4">
               <div className="flex flex-col gap-2">
@@ -42,11 +51,16 @@ export function App() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6">
+      <main className="w-full px-4 py-6">
         <DataTable />
       </main>
 
       <RowDetailModal />
+
+      <DatasetSelectionDialog
+        open={datasetDialogOpen}
+        onOpenChange={setDatasetDialogOpen}
+      />
     </div>
   );
 }

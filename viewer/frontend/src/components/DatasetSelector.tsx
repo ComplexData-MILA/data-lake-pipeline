@@ -1,56 +1,27 @@
-import { useEffect, useState } from "react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { fetchDatasets } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Database, ChevronDown } from "lucide-react";
 import { useViewerStore } from "@/hooks/useUrlState";
 
-export function DatasetSelector() {
-  const [datasets, setDatasets] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const { dataset, setDataset, setColumns, setAnnotators, resetFilters } =
-    useViewerStore();
+interface DatasetSelectorProps {
+  onOpenChange: (open: boolean) => void;
+}
 
-  useEffect(() => {
-    fetchDatasets()
-      .then(setDatasets)
-      .catch((err) => console.error("Failed to load datasets:", err))
-      .finally(() => setLoading(false));
-  }, []);
-
-  const handleChange = (value: string) => {
-    setDataset(value);
-    setColumns([]);
-    setAnnotators([]);
-    resetFilters();
-  };
-
-  if (loading) {
-    return (
-      <Select disabled>
-        <SelectTrigger className="w-full sm:w-[200px]">
-          <SelectValue placeholder="Loading..." />
-        </SelectTrigger>
-      </Select>
-    );
-  }
+export function DatasetSelector({ onOpenChange }: DatasetSelectorProps) {
+  const { dataset } = useViewerStore();
 
   return (
-    <Select value={dataset} onValueChange={handleChange}>
-      <SelectTrigger className="w-full sm:w-[200px]">
-        <SelectValue placeholder="Select dataset" />
-      </SelectTrigger>
-      <SelectContent>
-        {datasets.map((d) => (
-          <SelectItem key={d} value={d}>
-            {d}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Button
+      variant="outline"
+      onClick={() => onOpenChange(true)}
+      className="gap-2 min-w-[200px] justify-between"
+    >
+      <div className="flex items-center gap-2">
+        <Database className="h-4 w-4 text-muted-foreground" />
+        <span className={dataset ? "" : "text-muted-foreground"}>
+          {dataset || "Select dataset"}
+        </span>
+      </div>
+      <ChevronDown className="h-4 w-4 text-muted-foreground" />
+    </Button>
   );
 }

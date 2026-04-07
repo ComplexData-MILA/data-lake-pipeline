@@ -110,9 +110,9 @@ function FilterRow({ columns, filter, onChange }: FilterRowProps) {
 export function FilterPanel() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [columns, setColumns] = useState<string[]>([]);
+  const [schemaColumns, setSchemaColumns] = useState<string[]>([]);
   const [annotators, setAnnotators] = useState<string[]>([]);
-  const { dataset, filters, setBaseFilter, setAnnotatorFilter, resetFilters } =
+  const { dataset, baseColumns, filters, setBaseFilter, setAnnotatorFilter, resetFilters } =
     useViewerStore();
 
   useEffect(() => {
@@ -123,7 +123,7 @@ export function FilterPanel() {
       fetchAnnotators(dataset),
     ])
       .then(([schemaRes, annotatorsRes]) => {
-        setColumns(schemaRes.columns.map((c) => c.name));
+        setSchemaColumns(schemaRes.columns.map((c) => c.name));
         setAnnotators(annotatorsRes);
       })
       .catch((err) => console.error("Failed to load filter options:", err))
@@ -135,9 +135,11 @@ export function FilterPanel() {
     setOpen(false);
   };
 
-  const baseColumns = columns.filter(
-    (c) => !c.startsWith(".") && !annotators.some((a) => c.startsWith(`${a}.`))
-  );
+  const availableBaseColumns = baseColumns.length > 0
+    ? baseColumns
+    : schemaColumns.filter(
+        (c) => !annotators.some((a) => c.startsWith(`${a}.`))
+      );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -180,7 +182,7 @@ export function FilterPanel() {
             <TabsContent value="base" className="space-y-4 mt-4">
               {filters.base ? (
                 <FilterRow
-                  columns={baseColumns}
+                  columns={availableBaseColumns}
                   filter={filters.base}
                   onChange={setBaseFilter}
                 />
@@ -188,7 +190,7 @@ export function FilterPanel() {
                 <Button
                   variant="outline"
                   onClick={() =>
-                    setBaseFilter({ field: baseColumns[0] || "", op: "eq", value: "" })
+                    setBaseFilter({ field: availableBaseColumns[0] || "", op: "eq", value: "" })
                   }
                   className="gap-2"
                 >
@@ -199,9 +201,9 @@ export function FilterPanel() {
             </TabsContent>
 
             {annotators.map((ann) => {
-              const annColumns = columns
-                .filter((c) => c.startsWith(`${ann}.`))
-                .map((c) => c.replace(`${ann}.`, ""));
+              const annColumns = schemaColumns
+                .filter((col: string) => col.startsWith(`${ann}.`))
+                .map((col: string) => col.replace(`${ann}.`, ""));
               return (
                 <TabsContent key={ann} value={ann} className="space-y-4 mt-4">
                   {filters.annotators[ann] ? (

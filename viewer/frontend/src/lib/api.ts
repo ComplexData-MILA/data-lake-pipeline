@@ -105,10 +105,22 @@ export async function fetchData(
 
 export async function fetchRow(
   dataset: string,
-  rowId: string
+  rowId: string,
+  params: {
+    columns: string[];
+    annotators: string[];
+    annotatorColumns?: Record<string, string[]>;
+  }
 ): Promise<DataResponse> {
   const urlParams = new URLSearchParams();
   urlParams.set("row_id", rowId);
+  urlParams.set("columns", params.columns.join(","));
+  if (params.annotators.length > 0) {
+    urlParams.set("annotators", params.annotators.join(","));
+  }
+  if (params.annotatorColumns && Object.keys(params.annotatorColumns).length > 0) {
+    urlParams.set("annotator_columns", JSON.stringify(params.annotatorColumns));
+  }
   const res = await fetch(`${API_BASE}/datasets/${dataset}/data?${urlParams}`);
   if (!res.ok) throw new Error("Failed to fetch row");
   return res.json();

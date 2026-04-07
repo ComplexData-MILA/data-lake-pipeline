@@ -48,7 +48,7 @@ export interface ViewerState {
   pageSize: number;
   annotators: string[];
   annotatorColumns: Record<string, string[]>;
-  columns: string[];
+  baseColumns: string[];
   filters: {
     base?: FilterSpec;
     annotators: Record<string, FilterSpec | undefined>;
@@ -66,7 +66,7 @@ export const defaultState: ViewerState = {
   pageSize: 50,
   annotators: [],
   annotatorColumns: {},
-  columns: [],
+  baseColumns: [],
   filters: {
     base: undefined,
     annotators: {},
