@@ -9,6 +9,52 @@ class TestBuildQuery:
     """Tests for build_query function."""
 
     @pytest.mark.asyncio
+    async def test_query_with_annotator_filter_excludes_non_matching_rows(self):
+        """Test that annotator filters exclude non-matching base rows.
+
+        When an annotator filter is applied, rows from base that don't have
+        matching annotator data should NOT be returned at all (not with NULLs).
+        """
+        # annotator1 has rows: id=1 (label='positive'), id=2 (label='negative')
+        # When we filter for label='positive', only id=1 should be returned
+        filter_data = {
+            "annotators": {
+                "annotator1": {"field": "label", "op": "eq", "value": "positive"}
+            }
+        }
+        filters = duckdb_query.FilterSpec(filter_data)
+        query, columns, annotator_columns = duckdb_query.build_query(
+            dataset_name="test_ds",
+            columns=["id", "text"],
+            annotators=["annotator1"],
+            annotator_columns={"annotator1": ["label", "is_valid"]},
+            filters=filters,
+            offset=0,
+            limit=50,
+        )
+        # The query should use INNER JOIN for filtered annotators, not LEFT JOIN
+        # This ensures non-matching rows are excluded
+        assert "INNER JOIN" in query, "Filtered annotators should use INNER JOIN to exclude non-matching rows"
+
+    @pytest.mark.asyncio
+    async def test_query_with_annotator_filter_count_excludes_non_matching(self):
+        """Test that count query with annotator filters excludes non-matching rows."""
+        filter_data = {
+            "annotators": {
+                "annotator1": {"field": "label", "op": "eq", "value": "positive"}
+            }
+        }
+        filters = duckdb_query.FilterSpec(filter_data)
+        query = duckdb_query.build_count_query(
+            dataset_name="test_ds",
+            annotators=["annotator1"],
+            filters=filters,
+            annotator_columns={"annotator1": ["label"]},
+        )
+        # Count query should also use INNER JOIN for filtered annotators
+        assert "INNER JOIN" in query, "Count query should use INNER JOIN for filtered annotators"
+
+    @pytest.mark.asyncio
     async def test_basic_query_no_filters(self):
         """Test basic query without filters."""
         filters = duckdb_query.FilterSpec()
@@ -55,6 +101,11 @@ class TestBuildQuery:
         )
         assert "annotator1" in query
         assert "LEFT JOIN" in query
+        assert '"annotator1.label"' in query, "Annotator columns should be aliased with {annotator}.{col} format in SQL"
+        assert '"annotator1.is_valid"' in query, "Annotator columns should be aliased with {annotator}.{col} format in SQL"
+        assert "annotator1.label" in columns, "Returned columns list should include prefixed annotator column names"
+        assert "annotator1.is_valid" in columns, "Returned columns list should include prefixed annotator column names"
+        assert "annotator1" in annotator_columns
 
     @pytest.mark.asyncio
     async def test_query_column_aliasing(self):

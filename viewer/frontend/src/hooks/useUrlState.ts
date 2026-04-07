@@ -39,7 +39,7 @@ interface ViewerStore extends ViewerState {
   setPageSize: (pageSize: number) => void;
   setAnnotators: (annotators: string[]) => void;
   setAnnotatorColumns: (annotatorColumns: Record<string, string[]>) => void;
-  setColumns: (columns: string[]) => void;
+  setBaseColumns: (baseColumns: string[]) => void;
   setBaseFilter: (filter: FilterSpec | undefined) => void;
   setAnnotatorFilter: (annotator: string, filter: FilterSpec | undefined) => void;
   setSort: (sort: string | undefined, sortDir?: "asc" | "desc") => void;
@@ -52,8 +52,8 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   ...getInitialState(),
 
   setDataset: (dataset) => {
-    set({ dataset, page: 1, selectedId: null });
-    updateUrl({ ...get(), dataset, page: 1, selectedId: null });
+    set({ dataset, page: 1, selectedId: null, baseColumns: [], annotatorColumns: {} });
+    updateUrl({ ...get(), dataset, page: 1, selectedId: null, baseColumns: [], annotatorColumns: {} });
   },
 
   setPage: (page) => {
@@ -76,9 +76,9 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
     updateUrl({ ...get(), annotatorColumns, page: 1 });
   },
 
-  setColumns: (columns) => {
-    set({ columns });
-    updateUrl({ ...get(), columns });
+  setBaseColumns: (baseColumns) => {
+    set({ baseColumns });
+    updateUrl({ ...get(), baseColumns });
   },
 
   setBaseFilter: (filter) => {

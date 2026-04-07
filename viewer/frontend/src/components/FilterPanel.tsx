@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { fetchSchema, fetchAnnotators } from "@/lib/api";
+import { useState, useEffect, useRef } from "react";
+import { fetchSchema, fetchAnnotators, fetchAnnotatorColumns } from "@/lib/api";
 import { useViewerStore } from "@/hooks/useUrlState";
 import {
   Dialog,
@@ -110,9 +110,11 @@ function FilterRow({ columns, filter, onChange }: FilterRowProps) {
 export function FilterPanel() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [columns, setColumns] = useState<string[]>([]);
+  const [schemaColumns, setSchemaColumns] = useState<string[]>([]);
   const [annotators, setAnnotators] = useState<string[]>([]);
-  const { dataset, filters, setBaseFilter, setAnnotatorFilter, resetFilters } =
+  const [annotatorColumnOptions, setAnnotatorColumnOptions] = useState<Record<string, string[]>>({});
+  const loadedAnnotatorsRef = useRef<Set<string>>(new Set());
+  const { dataset, baseColumns, filters, setBaseFilter, setAnnotatorFilter, resetFilters } =
     useViewerStore();
 
   useEffect(() => {
@@ -122,9 +124,31 @@ export function FilterPanel() {
       fetchSchema(dataset, []),
       fetchAnnotators(dataset),
     ])
-      .then(([schemaRes, annotatorsRes]) => {
-        setColumns(schemaRes.columns.map((c) => c.name));
+      .then(async ([schemaRes, annotatorsRes]) => {
+        setSchemaColumns(schemaRes.columns.map((c) => c.name));
         setAnnotators(annotatorsRes);
+
+        // Fetch columns for each annotator
+        const columnPromises = annotatorsRes.map(async (ann) => {
+          if (loadedAnnotatorsRef.current.has(ann)) {
+            return { annotator: ann, columns: annotatorColumnOptions[ann] || [] };
+          }
+          try {
+            const columns = await fetchAnnotatorColumns(dataset, ann);
+            loadedAnnotatorsRef.current.add(ann);
+            return { annotator: ann, columns };
+          } catch (err) {
+            console.error(`Failed to load columns for ${ann}:`, err);
+            return { annotator: ann, columns: [] };
+          }
+        });
+
+        const results = await Promise.all(columnPromises);
+        const newAnnotatorColumns: Record<string, string[]> = {};
+        for (const result of results) {
+          newAnnotatorColumns[result.annotator] = result.columns;
+        }
+        setAnnotatorColumnOptions(newAnnotatorColumns);
       })
       .catch((err) => console.error("Failed to load filter options:", err))
       .finally(() => setLoading(false));
@@ -135,9 +159,11 @@ export function FilterPanel() {
     setOpen(false);
   };
 
-  const baseColumns = columns.filter(
-    (c) => !c.startsWith(".") && !annotators.some((a) => c.startsWith(`${a}.`))
-  );
+  const availableBaseColumns = baseColumns.length > 0
+    ? baseColumns
+    : schemaColumns.filter(
+        (c) => !annotators.some((a) => c.startsWith(`${a}.`))
+      );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -180,7 +206,7 @@ export function FilterPanel() {
             <TabsContent value="base" className="space-y-4 mt-4">
               {filters.base ? (
                 <FilterRow
-                  columns={baseColumns}
+                  columns={availableBaseColumns}
                   filter={filters.base}
                   onChange={setBaseFilter}
                 />
@@ -188,7 +214,7 @@ export function FilterPanel() {
                 <Button
                   variant="outline"
                   onClick={() =>
-                    setBaseFilter({ field: baseColumns[0] || "", op: "eq", value: "" })
+                    setBaseFilter({ field: availableBaseColumns[0] || "", op: "eq", value: "" })
                   }
                   className="gap-2"
                 >
@@ -199,9 +225,7 @@ export function FilterPanel() {
             </TabsContent>
 
             {annotators.map((ann) => {
-              const annColumns = columns
-                .filter((c) => c.startsWith(`${ann}.`))
-                .map((c) => c.replace(`${ann}.`, ""));
+              const annColumns = annotatorColumnOptions[ann] || [];
               return (
                 <TabsContent key={ann} value={ann} className="space-y-4 mt-4">
                   {filters.annotators[ann] ? (

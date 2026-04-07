@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fetchRow } from "@/lib/api";
 import { useViewerStore } from "@/hooks/useUrlState";
 import {
@@ -75,12 +75,28 @@ function renderValue(value: unknown): React.ReactNode {
   return String(value);
 }
 
+function parseAnnotatorColumn(col: string): { annotator: string; column: string } | null {
+  const dotIndex = col.indexOf(".");
+  if (dotIndex === -1) return null;
+  return {
+    annotator: col.slice(0, dotIndex),
+    column: col.slice(dotIndex + 1),
+  };
+}
+
 export function RowDetailModal() {
   const [row, setRow] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [activeTab, setActiveTab] = useState<"fields" | "json">("fields");
-  const { dataset, selectedId, setSelectedId } = useViewerStore();
+  const {
+    dataset,
+    selectedId,
+    setSelectedId,
+    baseColumns,
+    annotators,
+    annotatorColumns,
+  } = useViewerStore();
 
   useEffect(() => {
     if (!dataset || !selectedId) {
@@ -89,7 +105,10 @@ export function RowDetailModal() {
     }
     setLoading(true);
     setError(null);
-    fetchRow(dataset, selectedId)
+    fetchRow(dataset, selectedId, {
+      columns: baseColumns.length > 0 ? baseColumns : ["id", "_batch"],
+      annotatorColumns,
+    })
       .then((res) => setRow(res.rows[0]))
       .catch((err) => {
         console.error("Failed to load row:", err);
@@ -97,7 +116,61 @@ export function RowDetailModal() {
         setRow(null);
       })
       .finally(() => setLoading(false));
-  }, [dataset, selectedId]);
+  }, [dataset, selectedId, baseColumns, annotators, annotatorColumns]);
+
+  const displayColumns = useMemo(() => {
+    const cols: string[] = [];
+
+    if (baseColumns.length > 0) {
+      cols.push(...baseColumns);
+    } else if (row) {
+      const rowCols = Object.keys(row).filter(c => !c.includes(".") && c !== "_batch");
+      cols.push(...rowCols);
+    } else {
+      cols.push("id", "_batch");
+    }
+
+    annotators.forEach((ann) => {
+      const annCols = annotatorColumns[ann] || [];
+      annCols.forEach((col) => {
+        cols.push(`${ann}.${col}`);
+      });
+    });
+
+    return cols;
+  }, [baseColumns, annotators, annotatorColumns, row]);
+
+  const groupedFields = useMemo(() => {
+    type FieldItem = { type: "field"; label: string; value: unknown };
+    type AnnotatorHeader = { type: "annotator-header"; annotator: string };
+    type GroupedItem = FieldItem | AnnotatorHeader;
+
+    const items: GroupedItem[] = [];
+    const processedAnnotators = new Set<string>();
+
+    displayColumns.forEach((col) => {
+      if (row && !col.includes(".")) {
+        items.push({ type: "field", label: col, value: row[col] });
+      }
+    });
+
+    displayColumns.forEach((col) => {
+      const parsed = parseAnnotatorColumn(col);
+      if (parsed && !processedAnnotators.has(parsed.annotator)) {
+        processedAnnotators.add(parsed.annotator);
+        items.push({ type: "annotator-header", annotator: parsed.annotator });
+
+        displayColumns.forEach((innerCol) => {
+          const innerParsed = parseAnnotatorColumn(innerCol);
+          if (innerParsed && innerParsed.annotator === parsed.annotator && row) {
+            items.push({ type: "field", label: innerParsed.column, value: row[innerCol] });
+          }
+        });
+      }
+    });
+
+    return items;
+  }, [displayColumns, row]);
 
   const handleClose = () => {
     setSelectedId(null);
@@ -139,30 +212,40 @@ export function RowDetailModal() {
 
           {row && activeTab === "fields" && (
             <dl className="divide-y">
-              {Object.entries(row).map(([key, value]) => (
-                <FieldRow
-                  key={key}
-                  label={key}
-                  value={
-                    isUrl(value) ? (
-                      <a
-                        href={value}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 hover:underline flex items-center gap-1"
-                      >
-                        {value}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    ) : key.toLowerCase().includes("datetime") ||
-                       key.toLowerCase().includes("date") ||
-                       key.toLowerCase().includes("time")
-                      ? formatDateTime(value as string)
-                      : renderValue(value)
-                  }
-                />
-              ))}
-              {Object.keys(row).length === 0 && (
+              {groupedFields.map((item) => {
+                if (item.type === "annotator-header") {
+                  return (
+                    <div key={`header-${item.annotator}`} className="pt-6 px-0">
+                      <h3 className="text-sm font-semibold text-foreground">{item.annotator}</h3>
+                    </div>
+                  );
+                }
+                const { label, value } = item;
+                return (
+                  <FieldRow
+                    key={label}
+                    label={label}
+                    value={
+                      isUrl(value) ? (
+                        <a
+                          href={value}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline flex items-center gap-1"
+                        >
+                          {value}
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : label.toLowerCase().includes("datetime") ||
+                         label.toLowerCase().includes("date") ||
+                         label.toLowerCase().includes("time")
+                        ? formatDateTime(value as string)
+                        : renderValue(value)
+                    }
+                  />
+                );
+              })}
+              {groupedFields.length === 0 && (
                 <div className="py-4 text-center text-muted-foreground">No fields available</div>
               )}
             </dl>
