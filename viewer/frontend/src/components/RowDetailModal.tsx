@@ -75,6 +75,15 @@ function renderValue(value: unknown): React.ReactNode {
   return String(value);
 }
 
+function parseAnnotatorColumn(col: string): { annotator: string; column: string } | null {
+  const dotIndex = col.indexOf(".");
+  if (dotIndex === -1) return null;
+  return {
+    annotator: col.slice(0, dotIndex),
+    column: col.slice(dotIndex + 1),
+  };
+}
+
 export function RowDetailModal() {
   const [row, setRow] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(false);
@@ -98,7 +107,6 @@ export function RowDetailModal() {
     setError(null);
     fetchRow(dataset, selectedId, {
       columns: baseColumns.length > 0 ? baseColumns : ["id", "_batch"],
-      annotators,
       annotatorColumns,
     })
       .then((res) => setRow(res.rows[0]))
@@ -131,6 +139,38 @@ export function RowDetailModal() {
 
     return cols;
   }, [baseColumns, annotators, annotatorColumns, row]);
+
+  const groupedFields = useMemo(() => {
+    type FieldItem = { type: "field"; label: string; value: unknown };
+    type AnnotatorHeader = { type: "annotator-header"; annotator: string };
+    type GroupedItem = FieldItem | AnnotatorHeader;
+
+    const items: GroupedItem[] = [];
+    const processedAnnotators = new Set<string>();
+
+    displayColumns.forEach((col) => {
+      if (row && !col.includes(".")) {
+        items.push({ type: "field", label: col, value: row[col] });
+      }
+    });
+
+    displayColumns.forEach((col) => {
+      const parsed = parseAnnotatorColumn(col);
+      if (parsed && !processedAnnotators.has(parsed.annotator)) {
+        processedAnnotators.add(parsed.annotator);
+        items.push({ type: "annotator-header", annotator: parsed.annotator });
+
+        displayColumns.forEach((innerCol) => {
+          const innerParsed = parseAnnotatorColumn(innerCol);
+          if (innerParsed && innerParsed.annotator === parsed.annotator && row) {
+            items.push({ type: "field", label: innerParsed.column, value: row[innerCol] });
+          }
+        });
+      }
+    });
+
+    return items;
+  }, [displayColumns, row]);
 
   const handleClose = () => {
     setSelectedId(null);
@@ -172,12 +212,19 @@ export function RowDetailModal() {
 
           {row && activeTab === "fields" && (
             <dl className="divide-y">
-              {displayColumns.map((col) => {
-                const value = row[col];
+              {groupedFields.map((item) => {
+                if (item.type === "annotator-header") {
+                  return (
+                    <div key={`header-${item.annotator}`} className="pt-6 px-0">
+                      <h3 className="text-sm font-semibold text-foreground">{item.annotator}</h3>
+                    </div>
+                  );
+                }
+                const { label, value } = item;
                 return (
                   <FieldRow
-                    key={col}
-                    label={col}
+                    key={label}
+                    label={label}
                     value={
                       isUrl(value) ? (
                         <a
@@ -189,16 +236,16 @@ export function RowDetailModal() {
                           {value}
                           <ExternalLink className="h-3 w-3" />
                         </a>
-                      ) : col.toLowerCase().includes("datetime") ||
-                         col.toLowerCase().includes("date") ||
-                         col.toLowerCase().includes("time")
+                      ) : label.toLowerCase().includes("datetime") ||
+                         label.toLowerCase().includes("date") ||
+                         label.toLowerCase().includes("time")
                         ? formatDateTime(value as string)
                         : renderValue(value)
                     }
                   />
                 );
               })}
-              {displayColumns.length === 0 && (
+              {groupedFields.length === 0 && (
                 <div className="py-4 text-center text-muted-foreground">No fields available</div>
               )}
             </dl>

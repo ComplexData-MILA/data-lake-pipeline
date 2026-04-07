@@ -302,13 +302,13 @@ class TestAPIEndpoints:
         data = response.json()
         for row in data["rows"]:
             if row["id"] in ["row1", "row2"]:
-                assert "is_valid" in row
-                assert "label" in row
-                assert row.get("notes") is None
+                assert "annotator1.is_valid" in row
+                assert "annotator1.label" in row
+                assert row.get("annotator1.notes") is None
             elif row["id"] == "row3":
-                assert "label" in row
-                assert "notes" in row
-                assert row.get("is_valid") is None
+                assert "annotator1.label" in row
+                assert "annotator1.notes" in row
+                assert row.get("annotator1.is_valid") is None
 
     def test_get_data_pagination(self, client, test_dataset):
         """Test data endpoint pagination."""
@@ -336,6 +336,41 @@ class TestAPIEndpoints:
         assert "rows" in data
         assert len(data["rows"]) == 1
         assert data["rows"][0]["id"] == "row1"
+
+    def test_get_row_by_id_deterministic(self, client, test_dataset):
+        """Test that row_id returns the correct row deterministically.
+
+        This test verifies the fix for a bug where row_id filter was not
+        properly applied, causing random rows to be returned.
+        """
+        dataset_name = test_dataset["dataset_name"]
+
+        # Request each row by ID and verify correct row is returned
+        for row_id in ["row1", "row2", "row3", "row4"]:
+            response = client.get(f"/datasets/{dataset_name}/data?row_id={row_id}")
+            assert response.status_code == 200, f"Failed for row_id={row_id}"
+            data = response.json()
+            assert len(data["rows"]) == 1, f"Expected 1 row for row_id={row_id}, got {len(data['rows'])}"
+            assert data["rows"][0]["id"] == row_id, f"Expected id={row_id}, got {data['rows'][0]['id']}"
+
+    def test_get_row_by_id_with_annotators(self, client, test_dataset):
+        """Test that row_id works correctly when joining with annotators."""
+        dataset_name = test_dataset["dataset_name"]
+
+        response = client.get(
+            f"/datasets/{dataset_name}/data?row_id=row1&annotators=annotator1"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["rows"]) == 1
+        assert data["rows"][0]["id"] == "row1"
+
+    def test_get_row_by_id_not_found(self, client, test_dataset):
+        """Test that non-existent row_id returns 404."""
+        dataset_name = test_dataset["dataset_name"]
+
+        response = client.get(f"/datasets/{dataset_name}/data?row_id=nonexistent")
+        assert response.status_code == 404
 
 
 class TestAPIEdgeCases:

@@ -179,3 +179,9 @@
   - Removed old component files: AnnotatorSelector.tsx, ColumnSelector.tsx, AnnotatorColumnDialog.tsx
   - Added column caching: Base columns and annotator columns cached per dataset, no refetch on dialog reopen
   - Changed default selection: Base columns all selected by default, annotator columns none selected by default
+
+- Revise viewer frontend handling of annotator columns
+  - Created shadcn-style breadcrumb UI component (/viewer/frontend/src/components/ui/breadcrumb.tsx)
+  - Modified DataTable.tsx to render annotator columns using breadcrumb (annotator_name > column_name)
+  - Modified RowDetailModal.tsx to group columns: base columns first, then annotator sub-headers with their columns listed below
+  - parseAnnotatorColumn() helper splits "{annotator}.{column}" format into components

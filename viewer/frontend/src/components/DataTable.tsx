@@ -12,14 +12,22 @@ import {
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 // URL detection regex - matches http, https, ftp URLs
 const URL_REGEX = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/gi;
 
-// Minimum and maximum column widths in pixels
+// Minimum column width in pixels
 const MIN_COLUMN_WIDTH = 80;
-const MAX_COLUMN_WIDTH = 600;
+// Maximum column width is 30% of viewport
+const MAX_COLUMN_WIDTH_RATIO = 0.3;
 const CHAR_WIDTH_ESTIMATE = 8; // approximate pixel width per character
 
 interface ColumnWidthConfig {
@@ -105,7 +113,7 @@ function renderCellContent(value: unknown): React.ReactNode {
 function calculateColumnWidths(
   rows: Record<string, unknown>[],
   columns: string[],
-  config: ColumnWidthConfig = { minWidth: MIN_COLUMN_WIDTH, maxWidth: MAX_COLUMN_WIDTH }
+  config: ColumnWidthConfig = { minWidth: MIN_COLUMN_WIDTH, maxWidth: Infinity }
 ): Record<string, number> {
   const widths: Record<string, number> = {};
 
@@ -129,10 +137,46 @@ function calculateColumnWidths(
   return widths;
 }
 
+function parseAnnotatorColumn(col: string): { annotator: string; column: string } | null {
+  const dotIndex = col.indexOf(".");
+  if (dotIndex === -1) return null;
+  return {
+    annotator: col.slice(0, dotIndex),
+    column: col.slice(dotIndex + 1),
+  };
+}
+
+function renderColumnHeader(col: string): React.ReactNode {
+  const parsed = parseAnnotatorColumn(col);
+  if (!parsed) {
+    return col;
+  }
+  return (
+    <Breadcrumb>
+      <BreadcrumbList>
+        <BreadcrumbItem>
+          <BreadcrumbPage className="font-medium">{parsed.annotator}</BreadcrumbPage>
+        </BreadcrumbItem>
+        <BreadcrumbSeparator />
+        <BreadcrumbItem>
+          <BreadcrumbPage>{parsed.column}</BreadcrumbPage>
+        </BreadcrumbItem>
+      </BreadcrumbList>
+    </Breadcrumb>
+  );
+}
+
 export function DataTable() {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(false);
   const [totalCount, setTotalCount] = useState(0);
+  const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const {
     dataset,
@@ -173,8 +217,12 @@ export function DataTable() {
   }, [baseColumns, annotators, annotatorColumns, rows]);
 
   const columnWidths = useMemo(() => {
-    return calculateColumnWidths(rows, displayColumns);
-  }, [rows, displayColumns]);
+    const maxColWidth = viewportWidth * MAX_COLUMN_WIDTH_RATIO;
+    return calculateColumnWidths(rows, displayColumns, {
+      minWidth: MIN_COLUMN_WIDTH,
+      maxWidth: maxColWidth,
+    });
+  }, [rows, displayColumns, viewportWidth]);
 
   useEffect(() => {
     if (!dataset) {
@@ -188,13 +236,12 @@ export function DataTable() {
         page,
         pageSize,
         columns: baseColumns.length > 0 ? baseColumns : ["id", "_batch"],
-        annotators,
         annotatorColumns,
         filters,
         sort,
         sortDir,
       }),
-      fetchCount(dataset, annotators, filters),
+      fetchCount(dataset, filters),
     ])
       .then(([data, count]) => {
         setRows(data.rows);
@@ -277,10 +324,10 @@ export function DataTable() {
                   style={{ minWidth: `${columnWidths[col]}px`, maxWidth: `${columnWidths[col]}px` }}
                   onClick={() => handleSort(col)}
                 >
-                  <div className="truncate">
-                    {col}
+                  <span className="inline-flex items-center gap-1">
+                    <span className="truncate">{renderColumnHeader(col)}</span>
                     {getSortIcon(col)}
-                  </div>
+                  </span>
                 </TableHead>
               ))}
             </TableRow>
@@ -302,10 +349,13 @@ export function DataTable() {
                   {displayColumns.map((col) => (
                     <TableCell
                       key={col}
-                      className="truncate"
-                      style={{ minWidth: `${columnWidths[col]}px`, maxWidth: `${columnWidths[col]}px` }}
+                      className="align-top"
+                      style={{ 
+                        minWidth: `${columnWidths[col]}px`, 
+                        maxWidth: `${columnWidths[col]}px`,
+                      }}
                     >
-                      {renderCellContent(row[col])}
+                      <div className="line-clamp-3">{renderCellContent(row[col])}</div>
                     </TableCell>
                   ))}
                 </TableRow>

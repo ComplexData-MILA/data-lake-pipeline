@@ -101,6 +101,7 @@ def build_query(
     sort_dir: str = "asc",
     offset: int = 0,
     limit: int = 50,
+    row_id: str | None = None,
 ) -> tuple[str, list[str], dict[str, list[str]]]:
     """Build DuckDB query for paginated data with optional filters and joins."""
     base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
@@ -113,34 +114,45 @@ def build_query(
 
     base_cols = [c for c in columns if c != "id" and c != "_batch"]
     select_parts = ["id", "_batch"]
-    for col in base_cols:
-        select_parts.append(f"ANY_VALUE({col}) AS {col}")
-    ctes.append(
-        f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
-    )
+
+    if row_id:
+        for col in base_cols:
+            select_parts.append(col)
+        ctes.append(
+            f"base AS (SELECT DISTINCT ON (id) {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} ORDER BY id, _batch)"
+        )
+    else:
+        for col in base_cols:
+            select_parts.append(f"ANY_VALUE({col}) AS {col}")
+        ctes.append(
+            f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
+        )
 
     joined_annotators = []
     selected_annotator_columns: dict[str, list[str]] = {}
     annotator_filters = filters.get_annotator_filters()
 
     for annotator in annotators:
-        if annotator not in annotator_columns or not annotator_columns[annotator]:
-            continue
-
         annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
 
         ann_filter = annotator_filters.get(annotator)
         ann_where = FilterSpec().compile(annotator, ann_filter) if ann_filter else ""
         ann_where_clause = f" WHERE {ann_where}" if ann_where else ""
 
+        requested_cols = annotator_columns.get(annotator, [])
+
         try:
             cols_query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
             col_results = execute_query(cols_query)
             available_cols = set(col_results[0].keys()) if col_results else set()
         except Exception:
-            available_cols = set(annotator_columns[annotator])
+            available_cols = set()
 
-        valid_cols = [c for c in annotator_columns[annotator] if c in available_cols]
+        if requested_cols:
+            valid_cols = [c for c in requested_cols if c in available_cols] if available_cols else requested_cols
+        else:
+            valid_cols = [c for c in available_cols if c not in ["id", "_batch"]]
+
         if not valid_cols:
             continue
 
@@ -247,10 +259,3 @@ def execute_query(query: str) -> list[dict[str, Any]]:
     finally:
         conn.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def get_schema_from_parquet(path: str) -> dict[str, str]:
-    """Get column schema from a parquet file path."""
-    query = f"SELECT * FROM read_parquet('{path}') LIMIT 0"
-    results = execute_query(query)
-    return {}

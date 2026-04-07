@@ -200,14 +200,12 @@ async def get_schema(
 @app.get("/datasets/{dataset_name}/count")
 async def get_count(
     dataset_name: str,
-    annotators: str = Query(default="", description="Comma-separated annotator names"),
     annotator_columns: str = Query(
         default="{}", description="JSON dict mapping annotator to column names"
     ),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
 ):
     """Get approximate row count."""
-    annotator_list = [a.strip() for a in annotators.split(",") if a.strip()]
     try:
         annotator_cols = json.loads(annotator_columns) if annotator_columns else {}
     except json.JSONDecodeError:
@@ -216,6 +214,8 @@ async def get_count(
         filter_data = json.loads(filters) if filters else {}
     except json.JSONDecodeError:
         filter_data = {}
+
+    annotator_list = list(annotator_cols.keys()) if annotator_cols else []
 
     filter_spec = FilterSpec(filter_data)
     query = build_count_query(dataset_name, annotator_list, filter_spec, annotator_cols)
@@ -235,7 +235,6 @@ async def get_data(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=1000),
     columns: str = Query(default="", description="Comma-separated column names"),
-    annotators: str = Query(default="", description="Comma-separated annotator names"),
     annotator_columns: str = Query(
         default="{}", description="JSON dict mapping annotator to column names"
     ),
@@ -246,11 +245,12 @@ async def get_data(
 ):
     """Get paginated data rows."""
     column_list = [c.strip() for c in columns.split(",") if c.strip()]
-    annotator_list = [a.strip() for a in annotators.split(",") if a.strip()]
     try:
         annotator_cols = json.loads(annotator_columns) if annotator_columns else {}
     except json.JSONDecodeError:
         annotator_cols = {}
+
+    annotator_list = list(annotator_cols.keys()) if annotator_cols else []
 
     if not column_list:
         column_list = ["id", "_batch"]
@@ -261,7 +261,7 @@ async def get_data(
         filter_data = {}
 
     if row_id:
-        filter_data["id"] = {"eq": row_id}
+        filter_data["base"] = {"field": "id", "op": "eq", "value": row_id}
         page_size = 1
         page = 1
 
@@ -278,6 +278,7 @@ async def get_data(
         sort_dir,
         offset,
         page_size,
+        row_id,
     )
 
     try:
@@ -289,6 +290,8 @@ async def get_data(
             columns=selected_columns,
             annotator_columns=selected_annotator_columns,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Data query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

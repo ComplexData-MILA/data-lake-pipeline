@@ -50,13 +50,9 @@ export async function fetchSchema(
 
 export async function fetchCount(
   dataset: string,
-  annotators: string[],
   filters: object
 ): Promise<number> {
   const params = new URLSearchParams();
-  if (annotators.length > 0) {
-    params.set("annotators", annotators.join(","));
-  }
   params.set("filters", JSON.stringify(filters));
   const res = await fetch(
     `${API_BASE}/datasets/${dataset}/count?${params}`
@@ -70,7 +66,6 @@ export interface FetchDataParams {
   page: number;
   pageSize: number;
   columns: string[];
-  annotators: string[];
   annotatorColumns?: Record<string, string[]>;
   filters: object;
   sort?: string;
@@ -85,9 +80,6 @@ export async function fetchData(
   urlParams.set("page", String(params.page));
   urlParams.set("page_size", String(params.pageSize));
   urlParams.set("columns", params.columns.join(","));
-  if (params.annotators.length > 0) {
-    urlParams.set("annotators", params.annotators.join(","));
-  }
   if (params.annotatorColumns && Object.keys(params.annotatorColumns).length > 0) {
     urlParams.set("annotator_columns", JSON.stringify(params.annotatorColumns));
   }
@@ -108,16 +100,12 @@ export async function fetchRow(
   rowId: string,
   params: {
     columns: string[];
-    annotators: string[];
     annotatorColumns?: Record<string, string[]>;
   }
 ): Promise<DataResponse> {
   const urlParams = new URLSearchParams();
   urlParams.set("row_id", rowId);
   urlParams.set("columns", params.columns.join(","));
-  if (params.annotators.length > 0) {
-    urlParams.set("annotators", params.annotators.join(","));
-  }
   if (params.annotatorColumns && Object.keys(params.annotatorColumns).length > 0) {
     urlParams.set("annotator_columns", JSON.stringify(params.annotatorColumns));
   }
