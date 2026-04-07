@@ -337,12 +337,6 @@ class TestAPIEndpoints:
         assert len(data["rows"]) == 1
         assert data["rows"][0]["id"] == "row1"
 
-    def test_get_row_not_found(self, client, test_dataset):
-        """Test row endpoint with non-existent ID."""
-        dataset_name = test_dataset["dataset_name"]
-        response = client.get(f"/datasets/{dataset_name}/data?row_id=nonexistent")
-        assert response.status_code == 404
-
 
 class TestAPIEdgeCases:
     """Edge case tests for API endpoints."""

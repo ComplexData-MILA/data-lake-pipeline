@@ -14,6 +14,121 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
+// URL detection regex - matches http, https, ftp URLs
+const URL_REGEX = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/gi;
+
+// Minimum and maximum column widths in pixels
+const MIN_COLUMN_WIDTH = 80;
+const MAX_COLUMN_WIDTH = 600;
+const CHAR_WIDTH_ESTIMATE = 8; // approximate pixel width per character
+
+interface ColumnWidthConfig {
+  minWidth: number;
+  maxWidth: number;
+}
+
+function formatCellValue(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function detectUrls(text: string): Array<{ type: 'text' | 'url'; content: string }> {
+  const parts: Array<{ type: 'text' | 'url'; content: string }> = [];
+  let lastIndex = 0;
+  let match;
+
+  // Reset regex lastIndex
+  URL_REGEX.lastIndex = 0;
+
+  while ((match = URL_REGEX.exec(text)) !== null) {
+    // Add text before URL
+    if (match.index > lastIndex) {
+      parts.push({
+        type: 'text',
+        content: text.slice(lastIndex, match.index)
+      });
+    }
+    // Add URL
+    parts.push({
+      type: 'url',
+      content: match[0]
+    });
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    parts.push({
+      type: 'text',
+      content: text.slice(lastIndex)
+    });
+  }
+
+  return parts.length > 0 ? parts : [{ type: 'text', content: text }];
+}
+
+function renderCellContent(value: unknown): React.ReactNode {
+  const text = formatCellValue(value);
+  
+  // Check if text contains URLs
+  const parts = detectUrls(text);
+  
+  // If no URLs found or text is unchanged, return as-is
+  if (parts.length === 1 && parts[0].type === 'text') {
+    return text;
+  }
+
+  // Render mixed content with links
+  return (
+    <>
+      {parts.map((part, idx) => 
+        part.type === 'url' ? (
+          <a
+            key={idx}
+            href={part.content}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:text-blue-800 underline truncate inline-block max-w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {part.content}
+          </a>
+        ) : (
+          <span key={idx}>{part.content}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function calculateColumnWidths(
+  rows: Record<string, unknown>[],
+  columns: string[],
+  config: ColumnWidthConfig = { minWidth: MIN_COLUMN_WIDTH, maxWidth: MAX_COLUMN_WIDTH }
+): Record<string, number> {
+  const widths: Record<string, number> = {};
+
+  columns.forEach(col => {
+    let maxLength = col.length; // Start with header length
+
+    rows.forEach(row => {
+      const value = row[col];
+      const text = formatCellValue(value);
+      maxLength = Math.max(maxLength, text.length);
+    });
+
+    // Calculate pixel width with constraints
+    const pixelWidth = Math.min(
+      Math.max(maxLength * CHAR_WIDTH_ESTIMATE, config.minWidth),
+      config.maxWidth
+    );
+    widths[col] = pixelWidth;
+  });
+
+  return widths;
+}
+
 export function DataTable() {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(false);
@@ -56,6 +171,10 @@ export function DataTable() {
 
     return cols;
   }, [baseColumns, annotators, annotatorColumns, rows]);
+
+  const columnWidths = useMemo(() => {
+    return calculateColumnWidths(rows, displayColumns);
+  }, [rows, displayColumns]);
 
   useEffect(() => {
     if (!dataset) {
@@ -155,10 +274,13 @@ export function DataTable() {
                 <TableHead
                   key={col}
                   className="cursor-pointer hover:bg-muted/50"
+                  style={{ minWidth: `${columnWidths[col]}px`, maxWidth: `${columnWidths[col]}px` }}
                   onClick={() => handleSort(col)}
                 >
-                  {col}
-                  {getSortIcon(col)}
+                  <div className="truncate">
+                    {col}
+                    {getSortIcon(col)}
+                  </div>
                 </TableHead>
               ))}
             </TableRow>
@@ -178,8 +300,12 @@ export function DataTable() {
                   onClick={() => setSelectedId(row.id as string)}
                 >
                   {displayColumns.map((col) => (
-                    <TableCell key={col} className="truncate">
-                      {formatCellValue(row[col])}
+                    <TableCell
+                      key={col}
+                      className="truncate"
+                      style={{ minWidth: `${columnWidths[col]}px`, maxWidth: `${columnWidths[col]}px` }}
+                    >
+                      {renderCellContent(row[col])}
                     </TableCell>
                   ))}
                 </TableRow>
@@ -255,10 +381,4 @@ export function DataTable() {
       </div>
     </div>
   );
-}
-
-function formatCellValue(value: unknown): string {
-  if (value === null || value === undefined) return "-";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }

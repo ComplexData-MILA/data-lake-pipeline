@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
 import { DatasetSelector } from "@/components/DatasetSelector";
 import { DatasetSelectionDialog } from "@/components/DatasetSelectionDialog";
-import { AnnotatorSelector } from "@/components/AnnotatorSelector";
-import { ColumnSelector } from "@/components/ColumnSelector";
+import { ColumnConfigurator } from "@/components/ColumnConfigurator";
 import { FilterPanel } from "@/components/FilterPanel";
 import { DataTable } from "@/components/DataTable";
 import { RowDetailModal } from "@/components/RowDetailModal";
@@ -34,12 +33,8 @@ export function App() {
 
           {dataset && (
             <div className="mt-4 flex flex-wrap items-center gap-4">
-              <div className="flex flex-col gap-2">
-                <span className="text-xs text-muted-foreground">Annotators</span>
-                <AnnotatorSelector />
-              </div>
               <div className="flex items-center gap-2 ml-auto">
-                <ColumnSelector />
+                <ColumnConfigurator />
                 <FilterPanel />
                 <Button variant="ghost" size="sm" onClick={reset} className="gap-1">
                   <RefreshCw className="h-4 w-4" />

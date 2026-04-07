@@ -55,6 +55,11 @@ class TestBuildQuery:
         )
         assert "annotator1" in query
         assert "LEFT JOIN" in query
+        assert '"annotator1.label"' in query, "Annotator columns should be aliased with {annotator}.{col} format in SQL"
+        assert '"annotator1.is_valid"' in query, "Annotator columns should be aliased with {annotator}.{col} format in SQL"
+        assert "annotator1.label" in columns, "Returned columns list should include prefixed annotator column names"
+        assert "annotator1.is_valid" in columns, "Returned columns list should include prefixed annotator column names"
+        assert "annotator1" in annotator_columns
 
     @pytest.mark.asyncio
     async def test_query_column_aliasing(self):

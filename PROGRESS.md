@@ -168,3 +168,14 @@
   - get_duckdb_query generates WITH clause with pre-filtered CTEs per annotator
   - \_iter_filtered_items streams results using fetchmany(1000) for memory efficiency
   - FilterForAnnotation extends FilterForExport, adds S3 lock for annotation
+
+- Revise viewer frontend column selection UX
+  - Replaced separate AnnotatorSelector + ColumnSelector + AnnotatorColumnDialog with unified ColumnConfigurator
+  - Single "Columns" button shows popup with folded sections for base dataset and each annotator
+  - Base dataset section always expanded, columns fetched immediately
+  - Annotator sections collapsed by default, fetch columns on expand with skeleton loading
+  - Added @radix-ui/react-collapsible dependency for accordion UI
+  - Annotators with zero selected columns are not included in data fetch
+  - Removed old component files: AnnotatorSelector.tsx, ColumnSelector.tsx, AnnotatorColumnDialog.tsx
+  - Added column caching: Base columns and annotator columns cached per dataset, no refetch on dialog reopen
+  - Changed default selection: Base columns all selected by default, annotator columns none selected by default

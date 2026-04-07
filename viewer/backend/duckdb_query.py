@@ -156,7 +156,7 @@ def build_query(
 
     for ann in joined_annotators:
         for col in selected_annotator_columns[ann]:
-            select_cols.append(f"{ann}.{col}")
+            select_cols.append(f'{ann}.{col} AS "{ann}.{col}"')
 
     join_clause = ""
     if joined_annotators:
@@ -176,7 +176,12 @@ def build_query(
 
     query = f"WITH {', '.join(ctes)} SELECT {', '.join(select_cols)} FROM base{join_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
 
-    return query, ["id", "_batch"] + base_cols, selected_annotator_columns
+    result_columns = ["id", "_batch"] + base_cols
+    for ann in joined_annotators:
+        for col in selected_annotator_columns[ann]:
+            result_columns.append(f"{ann}.{col}")
+
+    return query, result_columns, selected_annotator_columns
 
 
 def build_count_query(

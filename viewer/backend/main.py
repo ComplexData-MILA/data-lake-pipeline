@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 from typing import Any
 
 import boto3
@@ -11,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from duckdb_query import (
+from .duckdb_query import (
     S3_ACCESS_KEY,
     S3_BUCKET,
     S3_ENDPOINT_URL,
