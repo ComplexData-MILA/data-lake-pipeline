@@ -128,7 +128,7 @@ def build_query(
             f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
         )
 
-    joined_annotators = []
+    joined_annotators: dict[str, bool] = {}
     selected_annotator_columns: dict[str, list[str]] = {}
     annotator_filters = filters.get_annotator_filters()
 
@@ -159,7 +159,7 @@ def build_query(
         ctes.append(
             f"{annotator} AS (SELECT * FROM read_parquet('{annot_path}', union_by_name=true) AS {annotator}{ann_where_clause})"
         )
-        joined_annotators.append(annotator)
+        joined_annotators[annotator] = bool(ann_filter)
         selected_annotator_columns[annotator] = valid_cols
 
     select_cols = ["base.id", "base._batch"]
@@ -172,7 +172,10 @@ def build_query(
 
     join_clause = ""
     if joined_annotators:
-        join_parts = [f"LEFT JOIN {ann} USING (id)" for ann in joined_annotators]
+        join_parts = []
+        for ann, has_filter in joined_annotators.items():
+            join_type = "INNER JOIN" if has_filter else "LEFT JOIN"
+            join_parts.append(f"{join_type} {ann} USING (id)")
         join_clause = " " + " ".join(join_parts)
 
     order_clause = " ORDER BY base.id ASC"
@@ -214,10 +217,10 @@ def build_count_query(
 
     join_parts = []
     annotator_filters = filters.get_annotator_filters()
-    active_annotators = [
-        a for a in annotators if a in annotator_columns and annotator_columns[a]
-    ]
-    for annotator in active_annotators:
+    active_annotators: dict[str, bool] = {}
+    for annotator in annotators:
+        if annotator not in annotator_columns or not annotator_columns[annotator]:
+            continue
         annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
         ann_filter = annotator_filters.get(annotator)
         ann_where = FilterSpec().compile(annotator, ann_filter) if ann_filter else ""
@@ -225,13 +228,18 @@ def build_count_query(
         join_parts.append(
             f"{annotator} AS (SELECT id FROM read_parquet('{annot_path}', union_by_name=true) AS {annotator}{ann_where_clause})"
         )
+        active_annotators[annotator] = bool(ann_filter)
 
     ctes = [cte] + join_parts
 
     if not active_annotators:
         return f"WITH {cte} SELECT COUNT(*) as cnt FROM base"
 
-    join_clause = " ".join([f"LEFT JOIN {a} USING (id)" for a in active_annotators])
+    join_clause_parts = []
+    for ann, has_filter in active_annotators.items():
+        join_type = "INNER JOIN" if has_filter else "LEFT JOIN"
+        join_clause_parts.append(f"{join_type} {ann} USING (id)")
+    join_clause = " ".join(join_clause_parts)
     return f"WITH {', '.join(ctes)} SELECT COUNT(DISTINCT base.id) as cnt FROM base {join_clause}"
 
 
