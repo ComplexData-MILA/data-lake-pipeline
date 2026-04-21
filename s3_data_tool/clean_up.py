@@ -131,14 +131,14 @@ async def merge_dataset_batch(
     dedup_iter = async_deduplicate_rows(row_iter, candidate.deduplicate_on)
 
     output_key = f"{batch_prefix}/merged.parquet"
+    temp_key = f"{batch_prefix}/merged.parquet.temp"
+
     deduped_count = await async_write_parquet(
-        s3_client, bucket, output_key, dedup_iter, schema
+        s3_client, bucket, temp_key, dedup_iter, schema
     )
 
-    keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys
-    if candidate.existing_parquet_key and candidate.existing_parquet_key != output_key:
-        keys_to_delete.append(candidate.existing_parquet_key)
-
+    await s3_client.copy_object(Bucket=bucket, Key=output_key, CopySource={"Bucket": bucket, "Key": temp_key})
+    keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + [temp_key]
     await delete_objects(s3_client, bucket, keys_to_delete)
 
     logger.info(
