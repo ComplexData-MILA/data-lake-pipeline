@@ -27,6 +27,8 @@ class TestBuildQuery:
         When an annotator filter is applied, rows from base that don't have
         matching annotator data should NOT be returned at all (not with NULLs).
         """
+        # annotator1 has rows: id=1 (label='positive'), id=2 (label='negative')
+        # When we filter for label='positive', only id=1 should be returned
         filter_data = {
             "annotators": {
                 "annotator1": {"field": "label", "op": "eq", "value": "positive"}

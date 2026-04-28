@@ -209,6 +209,7 @@ def build_query(
         available_base_cols = set(base_cols)
         if sort == "_batch" or sort in available_base_cols:
             direction = "DESC" if sort_dir == "desc" else "ASC"
+            # When sorting by another column, add id as secondary sort for determinism
             order_clause = (
                 f" ORDER BY base.{sort} {direction}, base.id ASC"
                 if sort != "_batch"
