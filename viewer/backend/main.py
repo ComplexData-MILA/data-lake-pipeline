@@ -21,6 +21,7 @@ from .duckdb_query import (
     build_query,
     execute_query,
 )
+from s3_data_tool.s3_utils import enumerate_parquet_paths_sync
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,36 +86,65 @@ class CountResponse(BaseModel):
     count: int
 
 
+def _prefix_contains_parquet(
+    client,
+    bucket: str,
+    prefix: str,
+) -> bool:
+    """Return True if any key under *prefix* ends with ``/merged.parquet``."""
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith("/merged.parquet"):
+                return True
+    return False
+
+
 def list_datasets_from_s3() -> list[str]:
-    """List all datasets under the S3 prefix."""
+    """List all datasets under the S3 prefix that have a merged.parquet."""
     client = get_s3_client()
-    datasets: set[str] = set()
-    list_prefix = f"{S3_PREFIX}/"
+    list_prefix = f"{S3_PREFIX.rstrip('/')}/"
 
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=list_prefix, Delimiter="/"):
+    candidate_names: list[str] = []
+    for page in paginator.paginate(
+        Bucket=S3_BUCKET, Prefix=list_prefix, Delimiter="/"
+    ):
         for cp in page.get("CommonPrefixes", []):
-            if (p := cp.get("Prefix")) is not None:
-                dataset_name = p.rstrip("/").split("/")[-1]
-                if not dataset_name.startswith("annotations"):
-                    datasets.add(dataset_name)
+            prefix_val = cp.get("Prefix", "")
+            name = prefix_val[len(list_prefix):].rstrip("/")
+            if name and not name.startswith("annotations"):
+                candidate_names.append(name)
+
+    datasets: list[str] = []
+    for name in candidate_names:
+        if _prefix_contains_parquet(client, S3_BUCKET, f"{list_prefix}{name}/"):
+            datasets.append(name)
     return sorted(datasets)
 
 
 def list_annotators_from_s3(dataset_name: str) -> list[str]:
-    """List all annotators for a dataset."""
+    """List all annotators for a dataset that have a merged.parquet."""
     client = get_s3_client()
-    annotators: set[str] = set()
     annotations_prefix = f"{S3_PREFIX}/{dataset_name}/annotations/"
 
     paginator = client.get_paginator("list_objects_v2")
+    candidate_names: list[str] = []
     for page in paginator.paginate(
         Bucket=S3_BUCKET, Prefix=annotations_prefix, Delimiter="/"
     ):
         for cp in page.get("CommonPrefixes", []):
-            if (p := cp.get("Prefix")) is not None:
-                annotator_name = p.rstrip("/").split("/")[-1]
-                annotators.add(annotator_name)
+            prefix_val = cp.get("Prefix", "")
+            name = prefix_val[len(annotations_prefix):].rstrip("/")
+            if name:
+                candidate_names.append(name)
+
+    annotators: list[str] = []
+    for name in candidate_names:
+        if _prefix_contains_parquet(
+            client, S3_BUCKET, f"{annotations_prefix}{name}/"
+        ):
+            annotators.append(name)
     return sorted(annotators)
 
 
@@ -123,32 +153,40 @@ def get_schema_with_types(
 ) -> list[SchemaColumn]:
     """Get combined schema from dataset and annotators."""
     columns: dict[str, str] = {}
+    client = get_s3_client()
 
-    base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
-    query = f"SELECT * FROM read_parquet('{base_path}', union_by_name=true) LIMIT 1"
-
-    try:
-        results = execute_query(query)
-        if results:
-            for col_name in results[0].keys():
-                if col_name and col_name not in columns:
-                    columns[col_name] = "unknown"
-    except Exception as e:
-        logger.warning(f"Failed to get schema from base: {e}")
-
-    for annotator in annotators:
-        annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
+    base_paths = enumerate_parquet_paths_sync(
+        client, S3_BUCKET, S3_PREFIX, dataset_name
+    )
+    if base_paths:
+        base_paths_sql = "[" + ", ".join(f"'{p}'" for p in base_paths) + "]"
         query = (
-            f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
+            f"SELECT * FROM read_parquet({base_paths_sql}, union_by_name=true) LIMIT 1"
         )
         try:
             results = execute_query(query)
             if results:
                 for col_name in results[0].keys():
-                    if col_name and col_name not in ["id", "_batch"]:
-                        columns[f"{annotator}.{col_name}"] = "unknown"
+                    if col_name and col_name not in columns:
+                        columns[col_name] = "unknown"
         except Exception as e:
-            logger.warning(f"Failed to get schema from annotator {annotator}: {e}")
+            logger.warning(f"Failed to get schema from base: {e}")
+
+    for annotator in annotators:
+        annot_paths = enumerate_parquet_paths_sync(
+            client, S3_BUCKET, S3_PREFIX, dataset_name, annotator
+        )
+        if annot_paths:
+            annot_paths_sql = "[" + ", ".join(f"'{p}'" for p in annot_paths) + "]"
+            query = f"SELECT * FROM read_parquet({annot_paths_sql}, union_by_name=true) LIMIT 1"
+            try:
+                results = execute_query(query)
+                if results:
+                    for col_name in results[0].keys():
+                        if col_name and col_name not in ["id", "_batch"]:
+                            columns[f"{annotator}.{col_name}"] = "unknown"
+            except Exception as e:
+                logger.warning(f"Failed to get schema from annotator {annotator}: {e}")
 
     return [SchemaColumn(name=name, type=typ) for name, typ in sorted(columns.items())]
 
@@ -170,8 +208,16 @@ async def get_annotations(dataset_name: str):
 @app.get("/datasets/{dataset_name}/annotations/{annotator}/columns")
 async def get_annotator_columns(dataset_name: str, annotator: str):
     """Get available column names for a specific annotator (union across all batches)."""
-    annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
-    query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 100"
+    client = get_s3_client()
+    annot_paths = enumerate_parquet_paths_sync(
+        client, S3_BUCKET, S3_PREFIX, dataset_name, annotator
+    )
+    if not annot_paths:
+        raise HTTPException(status_code=404, detail="Annotator not found")
+    annot_paths_sql = "[" + ", ".join(f"'{p}'" for p in annot_paths) + "]"
+    query = (
+        f"SELECT * FROM read_parquet({annot_paths_sql}, union_by_name=true) LIMIT 100"
+    )
     try:
         results = execute_query(query)
         if results:
@@ -216,9 +262,26 @@ async def get_count(
         filter_data = {}
 
     annotator_list = list(annotator_cols.keys()) if annotator_cols else []
+    client = get_s3_client()
+
+    base_parquet_paths = enumerate_parquet_paths_sync(
+        client, S3_BUCKET, S3_PREFIX, dataset_name
+    )
+    annot_parquet_paths = {
+        annotator: enumerate_parquet_paths_sync(
+            client, S3_BUCKET, S3_PREFIX, dataset_name, annotator
+        )
+        for annotator in annotator_list
+    }
 
     filter_spec = FilterSpec(filter_data)
-    query = build_count_query(dataset_name, annotator_list, filter_spec, annotator_cols)
+    query = build_count_query(
+        filter_spec,
+        base_parquet_paths,
+        annot_parquet_paths,
+        annotator_list,
+        annotator_cols,
+    )
 
     try:
         results = execute_query(query)
@@ -268,11 +331,23 @@ async def get_data(
     filter_spec = FilterSpec(filter_data)
     offset = (page - 1) * page_size
 
+    client = get_s3_client()
+    base_parquet_paths = enumerate_parquet_paths_sync(
+        client, S3_BUCKET, S3_PREFIX, dataset_name
+    )
+    annot_parquet_paths = {
+        annotator: enumerate_parquet_paths_sync(
+            client, S3_BUCKET, S3_PREFIX, dataset_name, annotator
+        )
+        for annotator in annotator_list
+    }
+
     query, selected_columns, selected_annotator_columns = build_query(
-        dataset_name,
         column_list,
         annotator_list,
         filter_spec,
+        base_parquet_paths,
+        annot_parquet_paths,
         annotator_cols,
         sort,
         sort_dir,

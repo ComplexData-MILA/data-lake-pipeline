@@ -27,7 +27,7 @@ import duckdb
 from .filter import FilterNode
 from .models import Annotation, DataItem, StreamingConfigs
 from .s3_lock import S3Lock, gather_subject_to_lock_renewal
-from .s3_utils import transform_row_for_jsonl, upload_jsonl_chunk
+from .s3_utils import enumerate_parquet_paths, transform_row_for_jsonl, upload_jsonl_chunk
 from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
@@ -194,13 +194,20 @@ class FilterForExport:
     def base_path(self) -> str:
         return f"s3://{self._bucket}/{self._prefix}/{self._dataset_name}"
 
+    def _format_parquet_paths(self, paths: list[str]) -> str:
+        assert paths, "paths must not be empty"
+        path_list = ", ".join(f"'{p}'" for p in paths)
+        return f"[{path_list}]"
+
     def _build_filtered_cte(
         self,
         name: str,
-        path: str,
+        paths: list[str],
         columns: list[str],
         filter_node: FilterNode | None,
-    ) -> str:
+    ) -> str | None:
+        if not paths:
+            return None
         non_id_cols = [c for c in columns if c != "id"]
         select_parts = ["id"]
         for col in non_id_cols:
@@ -209,30 +216,40 @@ class FilterForExport:
         where_clause = (
             f" WHERE {filter_node.compile(set(columns))}" if filter_node else ""
         )
-        return f"{name} AS (SELECT {cols_str} FROM read_parquet('{path}'){where_clause} GROUP BY id)"
+        paths_sql = self._format_parquet_paths(paths)
+        return f"{name} AS (SELECT {cols_str} FROM read_parquet({paths_sql}){where_clause} GROUP BY id)"
 
     async def get_duckdb_query(self) -> str:
         """Generate DuckDB query with WITH clause for filtered CTEs."""
-        ctes = []
+        ctes: list[str] = []
 
-        # Base text dataset
-        base_path = f"{self.base_path}/*/merged.parquet"
-        ctes.append(
-            self._build_filtered_cte(
-                "base_filtered", base_path, self._base_columns, self._base_filter
-            )
+        base_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
+        base_cte = self._build_filtered_cte(
+            "base_filtered", base_paths, self._base_columns, self._base_filter
+        )
+        if base_cte is None:
+            raise ValueError("No base paths found for dataset")
+        ctes.append(base_cte)
 
-        # Per-annotator parquets
-        ctes.extend(
+        annot_results = await asyncio.gather(*[
+            enumerate_parquet_paths(
+                self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
+            )
+            for _annotator, _cols in self._annotator_columns.items()
+        ])
+
+        annot_ctes = [
             self._build_filtered_cte(
                 f"{_annotator}_filtered",
-                f"{self.base_path}/annotations/{_annotator}/*/merged.parquet",
+                annot_paths,
                 _cols,
                 self._annotator_filters.get(_annotator),
             )
-            for _annotator, _cols in self._annotator_columns.items()
-        )
+            for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results)
+        ]
+        ctes.extend(cte for cte in annot_ctes if cte is not None)
 
         select_parts = ["base_filtered.*"] + [
             f"{a}_filtered.*" for a in self._annotator_columns
@@ -359,9 +376,15 @@ class FilterForAnnotation(FilterForExport):
 
     async def _iter_filtered_items(self) -> AsyncIterator[DataItem]:
         """Stream filtered DataItems excluding already annotated rows."""
-        base_path = f"{self.base_path}/*/merged.parquet"
-        annotator_path = (
-            f"{self.base_path}/annotations/{self._annotator_name}/*/merged.parquet"
+        base_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name
+        )
+        if not base_paths:
+            logger.warning("No base paths found, yielding nothing")
+            return
+
+        annotator_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name, self._annotator_name
         )
 
         non_id_cols = [c for c in self._base_columns if c != "id"]
@@ -377,18 +400,30 @@ class FilterForAnnotation(FilterForExport):
             else ""
         )
 
-        query = f"""
-        WITH base_filtered AS (
-            SELECT {cols_str} FROM read_parquet('{base_path}'){where_clause} GROUP BY id
-        ),
-        annotator_done AS (
-            SELECT id FROM read_parquet('{annotator_path}')
-        )
-        SELECT base_filtered.*
-        FROM base_filtered
-        LEFT JOIN annotator_done USING (id)
-        WHERE annotator_done.id IS NULL
-        """
+        base_paths_sql = self._format_parquet_paths(base_paths)
+
+        if not annotator_paths:
+            query = f"""
+            WITH base_filtered AS (
+                SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
+            )
+            SELECT base_filtered.*
+            FROM base_filtered
+            """
+        else:
+            annot_paths_sql = self._format_parquet_paths(annotator_paths)
+            query = f"""
+            WITH base_filtered AS (
+                SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
+            ),
+            annotator_done AS (
+                SELECT id FROM read_parquet({annot_paths_sql})
+            )
+            SELECT base_filtered.*
+            FROM base_filtered
+            LEFT JOIN annotator_done USING (id)
+            WHERE annotator_done.id IS NULL
+            """
 
         try:
             async for item in self._execute_and_stream(query):
@@ -398,7 +433,7 @@ class FilterForAnnotation(FilterForExport):
             if "No files found" in error_msg and "annotations/" in error_msg:
                 fallback_query = f"""
                 WITH base_filtered AS (
-                    SELECT {cols_str} FROM read_parquet('{base_path}'){where_clause} GROUP BY id
+                    SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
                 )
                 SELECT base_filtered.*
                 FROM base_filtered

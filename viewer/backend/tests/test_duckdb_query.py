@@ -5,6 +5,18 @@ import pytest
 from viewer.backend import duckdb_query
 
 
+TEST_BASE_PATHS = [
+    "s3://bucket/prefix/test_ds/batch1/merged.parquet",
+    "s3://bucket/prefix/test_ds/batch2/merged.parquet",
+]
+TEST_ANNOT_PATHS = {
+    "annotator1": [
+        "s3://bucket/prefix/test_ds/annotations/annotator1/batch1/merged.parquet",
+        "s3://bucket/prefix/test_ds/annotations/annotator1/batch2/merged.parquet",
+    ],
+}
+
+
 class TestBuildQuery:
     """Tests for build_query function."""
 
@@ -15,8 +27,6 @@ class TestBuildQuery:
         When an annotator filter is applied, rows from base that don't have
         matching annotator data should NOT be returned at all (not with NULLs).
         """
-        # annotator1 has rows: id=1 (label='positive'), id=2 (label='negative')
-        # When we filter for label='positive', only id=1 should be returned
         filter_data = {
             "annotators": {
                 "annotator1": {"field": "label", "op": "eq", "value": "positive"}
@@ -24,16 +34,15 @@ class TestBuildQuery:
         }
         filters = duckdb_query.FilterSpec(filter_data)
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=["annotator1"],
-            annotator_columns={"annotator1": ["label", "is_valid"]},
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths=TEST_ANNOT_PATHS,
+            annotator_columns={"annotator1": ["label", "is_valid"]},
             offset=0,
             limit=50,
         )
-        # The query should use INNER JOIN for filtered annotators, not LEFT JOIN
-        # This ensures non-matching rows are excluded
         assert "INNER JOIN" in query, "Filtered annotators should use INNER JOIN to exclude non-matching rows"
 
     @pytest.mark.asyncio
@@ -46,12 +55,12 @@ class TestBuildQuery:
         }
         filters = duckdb_query.FilterSpec(filter_data)
         query = duckdb_query.build_count_query(
-            dataset_name="test_ds",
-            annotators=["annotator1"],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths=TEST_ANNOT_PATHS,
+            annotators=["annotator1"],
             annotator_columns={"annotator1": ["label"]},
         )
-        # Count query should also use INNER JOIN for filtered annotators
         assert "INNER JOIN" in query, "Count query should use INNER JOIN for filtered annotators"
 
     @pytest.mark.asyncio
@@ -59,10 +68,11 @@ class TestBuildQuery:
         """Test basic query without filters."""
         filters = duckdb_query.FilterSpec()
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=[],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths={},
             offset=0,
             limit=50,
         )
@@ -76,10 +86,11 @@ class TestBuildQuery:
         filter_data = {"base": {"field": "annotator_name", "op": "eq", "value": "test"}}
         filters = duckdb_query.FilterSpec(filter_data)
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=[],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths={},
             offset=0,
             limit=50,
         )
@@ -91,11 +102,12 @@ class TestBuildQuery:
         """Test query with annotator join."""
         filters = duckdb_query.FilterSpec()
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=["annotator1"],
-            annotator_columns={"annotator1": ["label", "is_valid"]},
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths=TEST_ANNOT_PATHS,
+            annotator_columns={"annotator1": ["label", "is_valid"]},
             offset=0,
             limit=50,
         )
@@ -112,16 +124,15 @@ class TestBuildQuery:
         """Test that column aliasing in CTE uses correct syntax."""
         filters = duckdb_query.FilterSpec()
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text", "score"],
             annotators=[],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths={},
             offset=0,
             limit=50,
         )
-        # Check that ANY_VALUE is used for aggregation
         assert "ANY_VALUE" in query
-        # Check that GROUP BY uses correct syntax (without base. prefix inside CTE)
         assert "GROUP BY id" in query
 
 
@@ -133,9 +144,10 @@ class TestBuildCountQuery:
         """Test count query without filters."""
         filters = duckdb_query.FilterSpec()
         query = duckdb_query.build_count_query(
-            dataset_name="test_ds",
-            annotators=[],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths={},
+            annotators=[],
             annotator_columns={},
         )
         assert "SELECT COUNT" in query
@@ -146,9 +158,10 @@ class TestBuildCountQuery:
         filter_data = {"base": {"field": "value", "op": "gt", "value": 10}}
         filters = duckdb_query.FilterSpec(filter_data)
         query = duckdb_query.build_count_query(
-            dataset_name="test_ds",
-            annotators=[],
             filters=filters,
+            base_parquet_paths=TEST_BASE_PATHS,
+            annot_parquet_paths={},
+            annotators=[],
             annotator_columns={},
         )
         assert "WHERE" in query
@@ -190,7 +203,29 @@ class TestFilterSpecCompile:
     def test_compile_leading_dot_in_field(self):
         """Test compile handles leading dot in field (edge case)."""
         fs = duckdb_query.FilterSpec()
-        # This simulates potential user input issue
         result = fs.compile("base", {".field": "value", "op": "eq", "value": "test"})
-        # Should not produce double dots
         assert ".." not in result
+
+
+class TestFormatParquetPaths:
+    """Tests for _format_parquet_paths helper."""
+
+    def test_format_single_path(self):
+        """Test formatting single path."""
+        paths = ["s3://bucket/prefix/dataset/batch1/merged.parquet"]
+        result = duckdb_query._format_parquet_paths(paths)
+        assert result == "['s3://bucket/prefix/dataset/batch1/merged.parquet']"
+
+    def test_format_multiple_paths(self):
+        """Test formatting multiple paths."""
+        paths = [
+            "s3://bucket/prefix/dataset/batch1/merged.parquet",
+            "s3://bucket/prefix/dataset/batch2/merged.parquet",
+        ]
+        result = duckdb_query._format_parquet_paths(paths)
+        assert "['s3://bucket/prefix/dataset/batch1/merged.parquet', 's3://bucket/prefix/dataset/batch2/merged.parquet']" in result
+
+    def test_format_empty_paths(self):
+        """Test formatting empty list raises AssertionError."""
+        with pytest.raises(AssertionError):
+            duckdb_query._format_parquet_paths([])
