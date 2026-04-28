@@ -6,12 +6,12 @@ import logging
 import os
 import secrets
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
+import tempfile
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel
-
 from .async_utils import with_semaphore
 from .models import RunManifest
 
@@ -36,6 +36,7 @@ def transform_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
 
     transformed["id"] = row["id"]
     return transformed
+
 
 async def upload_run_manifest(
     s3_client: "S3Client",
@@ -236,7 +237,9 @@ async def discover_dataset_columns(
     if max_concurrency is None:
         max_concurrency = int(os.environ.get("FILTER_MAX_CONCURRENCY", "20"))
 
-    batches = await enumerate_batches(s3_client, bucket, prefix, dataset_name)
+    batches = await enumerate_batches(
+        s3_client, bucket, prefix, dataset_name
+    )
 
     if not batches:
         return set()
@@ -306,7 +309,9 @@ def merge_types(type1: pa.DataType, type2: pa.DataType) -> pa.DataType:
 
 
 async def enumerate_datasets(
-    s3_client: "S3Client", bucket: str, prefix: str
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
 ) -> list[str]:
     datasets: set[str] = set()
     list_prefix = f"{prefix.rstrip('/')}/"
@@ -323,7 +328,10 @@ async def enumerate_datasets(
 
 
 async def enumerate_batches(
-    s3_client: "S3Client", bucket: str, prefix: str, dataset_name: str
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
 ) -> list[str]:
     batches: set[str] = set()
     dataset_prefix = f"{prefix}/{dataset_name}/"
@@ -353,6 +361,48 @@ async def enumerate_annotators(
                 annotator_name = p.rstrip("/").split("/")[-1]
                 annotators.add(annotator_name)
     return sorted(annotators)
+
+
+async def enumerate_parquet_paths(
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    async for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/merged.parquet"):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
+
+
+def enumerate_parquet_paths_sync(
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/merged.parquet"):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
 
 
 async def iter_jsonl_rows(
@@ -512,22 +562,23 @@ async def async_write_parquet(
     schema: pa.Schema,
     batch_size: int = 100_000,
 ) -> int:
-    if len(schema) == 0:
-        table = pa.table({})
-        buf = io.BytesIO()
-        pq.write_table(table, buf)
-        buf.seek(0)
-        await s3_client.put_object(Bucket=bucket, Key=key, Body=buf.read())
-        return 0
-
-    buf = io.BytesIO()
     row_count = 0
-    with pq.ParquetWriter(buf, schema) as writer:
-        async for batch_rows in async_batched_rows(row_iter, batch_size):
-            batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
-            writer.write_batch(batch)
-            row_count += len(batch_rows)
 
-    buf.seek(0)
-    await s3_client.put_object(Bucket=bucket, Key=key, Body=buf.read())
+    with tempfile.TemporaryFile(mode="w+b") as f:
+        if len(schema) == 0:
+            table = pa.table({})
+            pq.write_table(table, f)
+            f.seek(0)
+            await s3_client.put_object(Bucket=bucket, Key=key, Body=f)
+            return 0
+
+        with pq.ParquetWriter(f, schema) as writer:
+            async for batch_rows in async_batched_rows(row_iter, batch_size):
+                batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
+                writer.write_batch(batch)
+                row_count += len(batch_rows)
+
+        f.seek(0)
+        await s3_client.put_object(Bucket=bucket, Key=key, Body=f)
+
     return row_count
