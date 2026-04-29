@@ -12,6 +12,7 @@ from viewer.backend.main import (
     list_annotators_from_s3,
     list_datasets_from_s3,
 )
+from s3_data_tool.s3_utils import enumerate_parquet_paths_sync
 
 pytestmark = pytest.mark.integration
 
@@ -33,8 +34,12 @@ class TestDuckDBQuery:
     async def test_execute_simple_query(self, test_dataset, s3_config):
         """Test executing a simple query."""
         dataset_name = test_dataset["dataset_name"]
-        base_path = f"s3://{s3_config['bucket']}/{s3_config['prefix']}/{dataset_name}/*/merged.parquet"
-        query = f"SELECT id, text FROM read_parquet('{base_path}') LIMIT 10"
+        client = get_s3_client()
+        base_paths = enumerate_parquet_paths_sync(
+            client, s3_config["bucket"], s3_config["prefix"], dataset_name
+        )
+        paths_sql = "[" + ", ".join(f"'{p}'" for p in base_paths) + "]"
+        query = f"SELECT id, text FROM read_parquet({paths_sql}) LIMIT 10"
 
         rows = duckdb_query.execute_query(query)
         assert len(rows) == 4
@@ -60,10 +65,11 @@ class TestDuckDBQuery:
         filters = duckdb_query.FilterSpec()
 
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=[],
             filters=filters,
+            base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
+            annot_parquet_paths={},
             offset=0,
             limit=50,
         )
@@ -78,11 +84,12 @@ class TestDuckDBQuery:
         filters = duckdb_query.FilterSpec()
 
         query, columns, annotator_columns = duckdb_query.build_query(
-            dataset_name="test_ds",
             columns=["id", "text"],
             annotators=["annotator1"],
-            annotator_columns={"annotator1": ["label", "is_valid"]},
             filters=filters,
+            base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
+            annot_parquet_paths={"annotator1": ["s3://bucket/prefix/test_ds/annotations/annotator1/batch1/merged.parquet"]},
+            annotator_columns={"annotator1": ["label", "is_valid"]},
             offset=0,
             limit=50,
         )
@@ -98,9 +105,10 @@ class TestDuckDBQuery:
         filters = duckdb_query.FilterSpec()
 
         query = duckdb_query.build_count_query(
-            dataset_name="test_ds",
-            annotators=[],
             filters=filters,
+            base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
+            annot_parquet_paths={},
+            annotators=[],
             annotator_columns={},
         )
 
@@ -113,9 +121,10 @@ class TestDuckDBQuery:
         filters = duckdb_query.FilterSpec(filter_data)
 
         query = duckdb_query.build_count_query(
-            dataset_name="test_ds",
-            annotators=[],
             filters=filters,
+            base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
+            annot_parquet_paths={},
+            annotators=[],
             annotator_columns={},
         )
 
