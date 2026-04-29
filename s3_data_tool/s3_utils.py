@@ -379,7 +379,9 @@ async def enumerate_parquet_paths(
     async for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if key.endswith("/merged.parquet"):
+            if key.endswith("/merged.parquet") and (
+                annotator or "/annotations/" not in key
+            ):
                 paths.append(f"s3://{bucket}/{key}")
     return sorted(paths)
 
@@ -400,7 +402,9 @@ def enumerate_parquet_paths_sync(
     for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if key.endswith("/merged.parquet"):
+            if key.endswith("/merged.parquet") and (
+                annotator or "/annotations/" not in key
+            ):
                 paths.append(f"s3://{bucket}/{key}")
     return sorted(paths)
 

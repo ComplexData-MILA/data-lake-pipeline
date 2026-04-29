@@ -230,38 +230,38 @@ class FilterForExport:
             "base_filtered", base_paths, self._base_columns, self._base_filter
         )
         if base_cte is None:
-            raise ValueError("No base paths found for dataset")
+            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
         ctes.append(base_cte)
 
         annot_results = await asyncio.gather(*[
             enumerate_parquet_paths(
                 self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
             )
-            for _annotator, _cols in self._annotator_columns.items()
+            for _annotator in self._annotator_columns
         ])
 
-        annot_ctes = [
-            self._build_filtered_cte(
-                f"{_annotator}_filtered",
-                annot_paths,
-                _cols,
+        active_annotators: list[str] = []
+        for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
+            if not annot_paths:
+                continue
+            cte = self._build_filtered_cte(
+                f"{_annotator}_filtered", annot_paths, _cols,
                 self._annotator_filters.get(_annotator),
             )
-            for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results)
-        ]
-        ctes.extend(cte for cte in annot_ctes if cte is not None)
+            if cte is not None:
+                ctes.append(cte)
+                active_annotators.append(_annotator)
 
         select_parts = ["base_filtered.*"] + [
-            f"{a}_filtered.*" for a in self._annotator_columns
+            f"{a}_filtered.*" for a in active_annotators
         ]
 
-        if not self._annotator_columns:
+        if not active_annotators:
             return f"WITH {', '.join(ctes)} SELECT {', '.join(select_parts)} FROM base_filtered"
 
-        join_targets = [
-            f"JOIN {a}_filtered USING (id)" for a in self._annotator_columns
-        ]
-        join_clause = " ".join(join_targets)
+        join_clause = " ".join(
+            f"JOIN {a}_filtered USING (id)" for a in active_annotators
+        )
 
         return (
             f"WITH {', '.join(ctes)} SELECT {', '.join(select_parts)} "
@@ -387,61 +387,55 @@ class FilterForAnnotation(FilterForExport):
             self._s3_client, self._bucket, self._prefix, self._dataset_name, self._annotator_name
         )
 
-        non_id_cols = [c for c in self._base_columns if c != "id"]
-        select_parts = ["id"]
-        for col in non_id_cols:
-            select_parts.append(f"ANY_VALUE({col}) AS {col}")
-        cols_str = ", ".join(select_parts)
+        ctes: list[str] = []
 
-        base_filter = self._base_filter
-        where_clause = (
-            f" WHERE {base_filter.compile(set(self._base_columns))}"
-            if base_filter
-            else ""
+        base_cte = self._build_filtered_cte(
+            "base_filtered", base_paths, self._base_columns, self._base_filter
+        )
+        if base_cte is None:
+            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
+        ctes.append(base_cte)
+
+        annot_results = await asyncio.gather(*[
+            enumerate_parquet_paths(
+                self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
+            )
+            for _annotator in self._annotator_columns
+        ])
+
+        active_annotators: list[str] = []
+        for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
+            if not annot_paths:
+                continue
+            cte = self._build_filtered_cte(
+                f"{_annotator}_filtered", annot_paths, _cols,
+                self._annotator_filters.get(_annotator),
+            )
+            if cte is not None:
+                ctes.append(cte)
+                active_annotators.append(_annotator)
+
+        anti_join = ""
+        if annotator_paths:
+            annot_paths_sql = self._format_parquet_paths(annotator_paths)
+            ctes.append(f"annotator_done AS (SELECT id FROM read_parquet({annot_paths_sql}))")
+            anti_join = " LEFT JOIN annotator_done USING (id) WHERE annotator_done.id IS NULL"
+
+        select_parts = ["base_filtered.*"] + [
+            f"{a}_filtered.*" for a in active_annotators
+        ]
+        join_parts = " ".join(
+            f"JOIN {a}_filtered USING (id)" for a in active_annotators
         )
 
-        base_paths_sql = self._format_parquet_paths(base_paths)
+        query = (
+            f"WITH {', '.join(ctes)} "
+            f"SELECT {', '.join(select_parts)} "
+            f"FROM base_filtered {join_parts}{anti_join}"
+        )
 
-        if not annotator_paths:
-            query = f"""
-            WITH base_filtered AS (
-                SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
-            )
-            SELECT base_filtered.*
-            FROM base_filtered
-            """
-        else:
-            annot_paths_sql = self._format_parquet_paths(annotator_paths)
-            query = f"""
-            WITH base_filtered AS (
-                SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
-            ),
-            annotator_done AS (
-                SELECT id FROM read_parquet({annot_paths_sql})
-            )
-            SELECT base_filtered.*
-            FROM base_filtered
-            LEFT JOIN annotator_done USING (id)
-            WHERE annotator_done.id IS NULL
-            """
-
-        try:
-            async for item in self._execute_and_stream(query):
-                yield item
-        except Exception as e:
-            error_msg = str(e)
-            if "No files found" in error_msg and "annotations/" in error_msg:
-                fallback_query = f"""
-                WITH base_filtered AS (
-                    SELECT {cols_str} FROM read_parquet({base_paths_sql}){where_clause} GROUP BY id
-                )
-                SELECT base_filtered.*
-                FROM base_filtered
-                """
-                async for item in self._execute_and_stream(fallback_query):
-                    yield item
-            else:
-                logger.error(f"Query execution failed: {e}")
+        async for item in self._execute_and_stream(query):
+            yield item
 
     async def __aenter__(self) -> "FilterForAnnotation":
         """Acquire annotation lock."""
