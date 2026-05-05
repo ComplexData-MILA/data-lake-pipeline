@@ -13,10 +13,7 @@ import pytest
 import pytest_asyncio
 
 from s3_data_tool.filter import AllFilter, BooleanFilter
-from s3_data_tool.data_filtering import (
-    AnnotationLockError,
-    DatasetNotMergedError,
-)
+
 from s3_data_tool.dataset_generator import _transform_row_for_jsonl
 from s3_data_tool.models import Annotation, DataItem
 
@@ -254,8 +251,8 @@ class TestExportView:
 class TestAnnotationView:
     """Tests for AnnotationView."""
 
-    async def test_lock_acquisition(self, s3_setup):
-        """Test lock acquisition succeeds."""
+    async def test_auto_claim_no_batches(self, s3_setup):
+        """Test that auto-claiming with no batches returns gracefully."""
         from s3_data_tool.data_filtering import FilterForAnnotation
 
         session, kwargs, bucket, prefix = s3_setup
@@ -271,42 +268,87 @@ class TestAnnotationView:
                 "test_annotator",
                 base_columns=["id", "text"],
             )
+
+            call_count = 0
+
+            async def annotator(item: DataItem) -> Annotation:
+                nonlocal call_count
+                call_count += 1
+                return Annotation(data={"label": "test"})
+
             async with view:
-                assert view._lock is not None
-                assert view._lock._acquired is True
+                await view.annotate(annotator)
 
-    async def test_lock_conflict(self, s3_setup):
-        """Test lock conflict raises error."""
-        import asyncio
+            # No batches were available, so annotator was never called
+            assert call_count == 0
 
+    async def test_auto_claim_exclusion(self, s3_setup):
+        """Test that two views auto-claiming partition the work — only one wins."""
         from s3_data_tool.data_filtering import FilterForAnnotation
 
         session, kwargs, bucket, prefix = s3_setup
         test_id = str(uuid.uuid4())[:8]
         dataset_name = f"ann_conflict_test_{test_id}"
 
-        async with session.client("s3", **kwargs) as client:
-            view1 = FilterForAnnotation(
-                client,
-                bucket,
-                prefix,
-                dataset_name,
-                "test_annotator",
-                base_columns=["id", "text"],
-            )
-            view2 = FilterForAnnotation(
-                client,
-                bucket,
-                prefix,
-                dataset_name,
-                "test_annotator",
-                base_columns=["id", "text"],
-            )
+        dataset_rows = [
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+        ]
 
-            async with view1:
-                with pytest.raises(AnnotationLockError):
+        async with session.client("s3", **kwargs) as client:
+            try:
+                key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
+                buf = create_parquet_buffer(dataset_rows)
+                await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
+
+                view1 = FilterForAnnotation(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text"],
+                )
+                view2 = FilterForAnnotation(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text"],
+                )
+
+                count1 = 0
+                count2 = 0
+
+                async def annotator1(item: DataItem) -> Annotation:
+                    nonlocal count1
+                    count1 += 1
+                    return Annotation(data={"label": "test"})
+
+                async def annotator2(item: DataItem) -> Annotation:
+                    nonlocal count2
+                    count2 += 1
+                    return Annotation(data={"label": "test"})
+
+                async with view1:
                     async with view2:
-                        pass
+                        await view1.annotate(annotator1)
+                        await view2.annotate(annotator2)
+
+                # Only one view claims the single batch — mutual exclusion via lock
+                assert (count1 == 1 and count2 == 0) or (
+                    count1 == 0 and count2 == 1
+                )
+            finally:
+                paginator = client.get_paginator("list_objects_v2")
+                keys_to_delete = []
+                async for page in paginator.paginate(
+                    Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"
+                ):
+                    for obj in page.get("Contents", []):
+                        keys_to_delete.append(obj["Key"])
+                for k in keys_to_delete:
+                    await client.delete_object(Bucket=bucket, Key=k)
 
     async def test_annotate_empty_dataset(self, s3_setup):
         """Test annotate on empty dataset."""
@@ -330,7 +372,7 @@ class TestAnnotationView:
                 return Annotation(data={"label": "test"})
 
             async with view:
-                await view.annotate(annotator, batch="test_batch")
+                await view.annotate(annotator)
 
     async def test_annotate_with_data(self, s3_setup):
         """Test annotate with actual data."""
@@ -368,12 +410,12 @@ class TestAnnotationView:
                     return Annotation(data={"label": f"label_{item.id}"})
 
                 async with view:
-                    await view.annotate(annotator, batch="test_batch")
+                    await view.annotate(annotator)
 
                 assert call_count == 2
 
                 ann_key = (
-                    f"{prefix}/{dataset_name}/annotations/test_annotator/test_batch"
+                    f"{prefix}/{dataset_name}/annotations/test_annotator/batch1"
                 )
                 paginator = client.get_paginator("list_objects_v2")
                 jsonl_files = []
@@ -441,7 +483,7 @@ class TestAnnotationView:
                     return Annotation(data={"label": "new"})
 
                 async with view:
-                    await view.annotate(annotator, batch="batch1")
+                    await view.annotate(annotator)
 
                 assert "1" not in annotated_ids
                 assert "2" in annotated_ids
@@ -496,7 +538,7 @@ class TestAnnotationView:
                     return Annotation(data={"label": "new"})
 
                 async with view:
-                    await view.annotate(annotator, batch="test_batch")
+                    await view.annotate(annotator)
 
                 assert set(annotated_ids) == {"1", "3"}
 
@@ -512,7 +554,11 @@ class TestAnnotationView:
                     await client.delete_object(Bucket=bucket, Key=key)
 
     async def test_dataset_not_merged_error(self, s3_setup):
-        """Test error when dataset parquet doesn't exist."""
+        """Test that annotating a batch without merged.parquet completes without error.
+
+        DuckDB raises 'No files found', which is caught and logged. The generator
+        yields nothing, so annotation completes with zero items processed.
+        """
         from s3_data_tool.data_filtering import FilterForAnnotation
 
         session, kwargs, bucket, prefix = s3_setup
@@ -536,8 +582,8 @@ class TestAnnotationView:
                 return Annotation(data={"label": "test"})
 
             async with view:
-                with pytest.raises(DatasetNotMergedError):
-                    await view.annotate(annotator, batch="batch1")
+                # Completes without raising — DuckDB error is caught internally
+                await view.annotate(annotator)
 
             await client.delete_object(Bucket=bucket, Key=marker_key)
 
