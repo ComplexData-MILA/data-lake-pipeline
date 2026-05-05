@@ -208,3 +208,35 @@ async def gather_subject_to_lock_renewal(
         for r in results
         if not isinstance(r, (asyncio.CancelledError, LockRenewalError))
     ]
+
+
+async def gather_subject_to_multi_lock_renewal(
+    locks: list[S3Lock], tasks: list[asyncio.Task[T]]
+) -> list[T | BaseException]:
+    """Like gather_subject_to_lock_renewal but renews multiple locks.
+
+    If any lock renewal fails, all work tasks are cancelled.
+    """
+    renewal_tasks: list[asyncio.Task[LockRenewalError]] = [
+        asyncio.create_task(renew_lock_periodically(lock)) for lock in locks
+    ]
+    renewal_set: set[asyncio.Task] = set(renewal_tasks)
+    pending: set[asyncio.Task] = {*tasks, *renewal_set}
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        # Stop if any renewal task completed (renewal failed)
+        if done & renewal_set:
+            for t in pending:
+                t.cancel()
+            break
+        # Stop if only renewal tasks remain (all real tasks done)
+        if pending == renewal_set:
+            break
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return [
+        r
+        for r in results
+        if not isinstance(r, (asyncio.CancelledError, LockRenewalError))
+    ]
