@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
+import tempfile
 
 import duckdb
 import pyarrow as pa
@@ -36,6 +37,7 @@ def transform_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
 
     transformed["id"] = row["id"]
     return transformed
+
 
 async def upload_run_manifest(
     s3_client: "S3Client",
@@ -512,22 +514,23 @@ async def async_write_parquet(
     schema: pa.Schema,
     batch_size: int = 100_000,
 ) -> int:
-    if len(schema) == 0:
-        table = pa.table({})
-        buf = io.BytesIO()
-        pq.write_table(table, buf)
-        buf.seek(0)
-        await s3_client.put_object(Bucket=bucket, Key=key, Body=buf.read())
-        return 0
-
-    buf = io.BytesIO()
     row_count = 0
-    with pq.ParquetWriter(buf, schema) as writer:
-        async for batch_rows in async_batched_rows(row_iter, batch_size):
-            batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
-            writer.write_batch(batch)
-            row_count += len(batch_rows)
 
-    buf.seek(0)
-    await s3_client.put_object(Bucket=bucket, Key=key, Body=buf.read())
+    with tempfile.TemporaryFile(mode="w+b") as f:
+        if len(schema) == 0:
+            table = pa.table({})
+            pq.write_table(table, f)
+            f.seek(0)
+            await s3_client.put_object(Bucket=bucket, Key=key, Body=f)
+            return 0
+
+        with pq.ParquetWriter(f, schema) as writer:
+            async for batch_rows in async_batched_rows(row_iter, batch_size):
+                batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
+                writer.write_batch(batch)
+                row_count += len(batch_rows)
+
+        f.seek(0)
+        await s3_client.put_object(Bucket=bucket, Key=key, Body=f)
+
     return row_count
