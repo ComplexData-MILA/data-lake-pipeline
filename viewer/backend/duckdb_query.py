@@ -91,11 +91,18 @@ class FilterSpec:
         return ""
 
 
+def _format_parquet_paths(paths: list[str]) -> str:
+    assert paths, "paths must not be empty"
+    path_list = ", ".join(f"'{p}'" for p in paths)
+    return f"[{path_list}]"
+
+
 def build_query(
-    dataset_name: str,
     columns: list[str],
     annotators: list[str],
     filters: FilterSpec,
+    base_parquet_paths: list[str],
+    annot_parquet_paths: dict[str, list[str]],
     annotator_columns: dict[str, list[str]] = {},
     sort: str | None = None,
     sort_dir: str = "asc",
@@ -103,8 +110,24 @@ def build_query(
     limit: int = 50,
     row_id: str | None = None,
 ) -> tuple[str, list[str], dict[str, list[str]]]:
-    """Build DuckDB query for paginated data with optional filters and joins."""
-    base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
+    """Build DuckDB query for paginated data with optional filters and joins.
+
+    Args:
+        columns: List of column names to select
+        annotators: List of annotator names to join
+        filters: FilterSpec containing base and annotator filters
+        base_parquet_paths: Explicit list of S3 parquet paths for base dataset
+        annot_parquet_paths: Dict mapping annotator name to list of their parquet paths
+        annotator_columns: Dict mapping annotator to list of requested columns
+        sort: Column to sort by
+        sort_dir: Sort direction ('asc' or 'desc')
+        offset: Pagination offset
+        limit: Pagination limit
+        row_id: If set, fetch single row by ID
+    """
+    if not base_parquet_paths:
+        return "", ["id", "_batch"], {}
+    base_paths_sql = _format_parquet_paths(base_parquet_paths)
 
     ctes = []
 
@@ -119,13 +142,13 @@ def build_query(
         for col in base_cols:
             select_parts.append(col)
         ctes.append(
-            f"base AS (SELECT DISTINCT ON (id) {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} ORDER BY id, _batch)"
+            f"base AS (SELECT DISTINCT ON (id) {', '.join(select_parts)} FROM read_parquet({base_paths_sql}, union_by_name=true) AS base{base_where_clause} ORDER BY id, _batch)"
         )
     else:
         for col in base_cols:
             select_parts.append(f"ANY_VALUE({col}) AS {col}")
         ctes.append(
-            f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
+            f"base AS (SELECT {', '.join(select_parts)} FROM read_parquet({base_paths_sql}, union_by_name=true) AS base{base_where_clause} GROUP BY id, _batch)"
         )
 
     joined_annotators: dict[str, bool] = {}
@@ -133,7 +156,10 @@ def build_query(
     annotator_filters = filters.get_annotator_filters()
 
     for annotator in annotators:
-        annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
+        annot_paths = annot_parquet_paths.get(annotator, [])
+        if not annot_paths:
+            continue
+        annot_paths_sql = _format_parquet_paths(annot_paths)
 
         ann_filter = annotator_filters.get(annotator)
         ann_where = FilterSpec().compile(annotator, ann_filter) if ann_filter else ""
@@ -142,7 +168,7 @@ def build_query(
         requested_cols = annotator_columns.get(annotator, [])
 
         try:
-            cols_query = f"SELECT * FROM read_parquet('{annot_path}', union_by_name=true) LIMIT 1"
+            cols_query = f"SELECT * FROM read_parquet({annot_paths_sql}, union_by_name=true) LIMIT 1"
             col_results = execute_query(cols_query)
             available_cols = set(col_results[0].keys()) if col_results else set()
         except Exception:
@@ -157,7 +183,7 @@ def build_query(
             continue
 
         ctes.append(
-            f"{annotator} AS (SELECT * FROM read_parquet('{annot_path}', union_by_name=true) AS {annotator}{ann_where_clause})"
+            f"{annotator} AS (SELECT * FROM read_parquet({annot_paths_sql}, union_by_name=true) AS {annotator}{ann_where_clause})"
         )
         joined_annotators[annotator] = bool(ann_filter)
         selected_annotator_columns[annotator] = valid_cols
@@ -201,19 +227,22 @@ def build_query(
 
 
 def build_count_query(
-    dataset_name: str,
-    annotators: list[str],
     filters: FilterSpec,
+    base_parquet_paths: list[str],
+    annot_parquet_paths: dict[str, list[str]],
+    annotators: list[str],
     annotator_columns: dict[str, list[str]] = {},
 ) -> str:
     """Build query to get approximate row count."""
-    base_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/*/merged.parquet"
+    if not base_parquet_paths:
+        return "SELECT 0 AS cnt"
+    base_paths_sql = _format_parquet_paths(base_parquet_paths)
 
     base_filter = filters.get_base_filter()
     base_where = FilterSpec().compile("base", base_filter) if base_filter else ""
     base_where_clause = f" WHERE {base_where}" if base_where else ""
 
-    cte = f"base AS (SELECT id FROM read_parquet('{base_path}', union_by_name=true) AS base{base_where_clause} GROUP BY id)"
+    cte = f"base AS (SELECT id FROM read_parquet({base_paths_sql}, union_by_name=true) AS base{base_where_clause} GROUP BY id)"
 
     join_parts = []
     annotator_filters = filters.get_annotator_filters()
@@ -221,12 +250,15 @@ def build_count_query(
     for annotator in annotators:
         if annotator not in annotator_columns or not annotator_columns[annotator]:
             continue
-        annot_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/{dataset_name}/annotations/{annotator}/*/merged.parquet"
+        annot_paths = annot_parquet_paths.get(annotator, [])
+        if not annot_paths:
+            continue
+        annot_paths_sql = _format_parquet_paths(annot_paths)
         ann_filter = annotator_filters.get(annotator)
         ann_where = FilterSpec().compile(annotator, ann_filter) if ann_filter else ""
         ann_where_clause = f" WHERE {ann_where}" if ann_where else ""
         join_parts.append(
-            f"{annotator} AS (SELECT id FROM read_parquet('{annot_path}', union_by_name=true) AS {annotator}{ann_where_clause})"
+            f"{annotator} AS (SELECT id FROM read_parquet({annot_paths_sql}, union_by_name=true) AS {annotator}{ann_where_clause})"
         )
         active_annotators[annotator] = bool(ann_filter)
 

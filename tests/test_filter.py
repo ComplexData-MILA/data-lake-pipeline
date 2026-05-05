@@ -633,7 +633,7 @@ class TestSchemaDiscovery:
                 assert exists is True
 
                 columns = await read_parquet_columns(client, test_bucket, key)
-                assert columns == {"id", "text", "is_valid", "priority"}
+                assert columns == {"id", "text", "is_valid", "priority", "_batch"}
 
             finally:
                 await client.delete_object(Bucket=test_bucket, Key=key)
@@ -717,7 +717,7 @@ class TestSchemaDiscovery:
                 )
 
                 all_columns = set().union(*results)
-                assert all_columns == {"id", "text", "is_valid", "priority"}
+                assert all_columns == {"id", "text", "is_valid", "priority", "_batch"}
 
             finally:
                 for ds in datasets:

@@ -61,6 +61,10 @@ class WSSMutex:
         if not self.ws:
             return
 
+        elapsed = (time.monotonic() - self._acquired_at) * 1000 if self._acquired_at is not None else 0
+        if self._ttl_ms is not None and elapsed > self._ttl_ms:
+            print(f"Lock was not released in time ({elapsed:.0f}ms > {self._ttl_ms}ms TTL)")
+
         await self.ws.send(json.dumps({"type": "release"}))
         await self.ws.close()
         self.ws = None

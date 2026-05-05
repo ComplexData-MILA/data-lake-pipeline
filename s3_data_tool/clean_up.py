@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import hashlib
 import json
@@ -113,8 +114,11 @@ async def merge_dataset_batch(
 ) -> bool:
     candidate = await discover_merge_candidate(s3_client, bucket, batch_prefix)
 
-    if not candidate.jsonl_keys and not candidate.existing_parquet_key:
-        logger.info(f"No files to merge for {batch_prefix}")
+    if not candidate.jsonl_keys:
+        if candidate.existing_parquet_key:
+            logger.debug(f"Skipping {batch_prefix}: already merged (no JSONL files)")
+            return True
+        logger.debug(f"No files to merge for {batch_prefix}")
         return True
 
     schema = await discover_schema(s3_client, bucket, candidate)
@@ -137,7 +141,9 @@ async def merge_dataset_batch(
         s3_client, bucket, temp_key, dedup_iter, schema
     )
 
-    await s3_client.copy_object(Bucket=bucket, Key=output_key, CopySource={"Bucket": bucket, "Key": temp_key})
+    await s3_client.copy_object(
+        Bucket=bucket, Key=output_key, CopySource={"Bucket": bucket, "Key": temp_key}
+    )
     keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + [temp_key]
     await delete_objects(s3_client, bucket, keys_to_delete)
 
@@ -155,7 +161,10 @@ async def merge_annotation_batch(
 ) -> bool:
     candidate = await discover_merge_candidate(s3_client, bucket, batch_prefix)
 
-    if not candidate.jsonl_keys and not candidate.existing_parquet_key:
+    if not candidate.jsonl_keys:
+        if candidate.existing_parquet_key:
+            logger.info(f"Skipping {batch_prefix}: already merged (no JSONL files)")
+            return True
         logger.info(f"No files to merge for {batch_prefix}")
         return True
 
@@ -188,20 +197,52 @@ async def merge_annotation_batch(
     return True
 
 
+def _parse_colon_filter(
+    raw_values: list[str],
+) -> dict[str, set[str]]:
+    """Parse a list of ``dataset:value`` strings into ``{dataset: {values}}``."""
+    result: dict[str, set[str]] = {}
+    for item in raw_values:
+        if ":" not in item:
+            raise ValueError(
+                f"Expected 'dataset:value' format, got '{item}'"
+            )
+        dataset, value = item.split(":", 1)
+        result.setdefault(dataset, set()).add(value)
+    return result
+
+
 async def run_clean_up(
     s3_client: "S3Client",
     bucket: str,
     prefix: str,
     lock_ttl_ms: int = 3_600_000,
+    batches: dict[str, set[str]] | None = None,
+    annotators: dict[str, set[str]] | None = None,
 ) -> None:
     datasets = await enumerate_datasets(s3_client, bucket, prefix)
     logger.info(f"Found {len(datasets)} datasets")
 
     for dataset in datasets:
-        batches = await enumerate_batches(s3_client, bucket, prefix, dataset)
-        logger.info(f"Dataset {dataset}: {len(batches)} batches")
+        if batches is not None:
+            allowed_batches = batches.get(dataset)
+            if allowed_batches is not None:
+                found = await enumerate_batches(s3_client, bucket, prefix, dataset)
+                dataset_batches = [b for b in found if b in allowed_batches]
+                logger.info(
+                    f"Dataset {dataset}: {len(dataset_batches)}/{len(found)} batches "
+                    f"(filtered)"
+                )
+            else:
+                logger.info(
+                    f"Dataset {dataset}: skipping batches (not in --batch filter)"
+                )
+                dataset_batches = []
+        else:
+            dataset_batches = await enumerate_batches(s3_client, bucket, prefix, dataset)
+            logger.info(f"Dataset {dataset}: {len(dataset_batches)} batches")
 
-        for batch in batches:
+        for batch in dataset_batches:
             batch_prefix = f"{prefix}/{dataset}/{batch}"
             lock = S3Lock(batch_prefix, lock_ttl_ms, s3_client, bucket)
             async with lock:
@@ -210,8 +251,22 @@ async def run_clean_up(
                     continue
                 await merge_dataset_batch(s3_client, bucket, batch_prefix)
 
-        annotators = await enumerate_annotators(s3_client, bucket, prefix, dataset)
-        for annotator in annotators:
+        if annotators is not None:
+            allowed_annotators = annotators.get(dataset)
+            if allowed_annotators is not None:
+                found = await enumerate_annotators(s3_client, bucket, prefix, dataset)
+                dataset_annotators = [a for a in found if a in allowed_annotators]
+            else:
+                logger.info(
+                    f"Dataset {dataset}: skipping annotators (not in --annotator filter)"
+                )
+                dataset_annotators = []
+        else:
+            dataset_annotators = await enumerate_annotators(
+                s3_client, bucket, prefix, dataset
+            )
+
+        for annotator in dataset_annotators:
             annotator_batches = await enumerate_batches(
                 s3_client, bucket, f"{prefix}/{dataset}/annotations", annotator
             )
@@ -230,10 +285,32 @@ async def run_clean_up(
 
 
 async def _main() -> None:
+    parser = argparse.ArgumentParser(description="Merge JSONL files into Parquet")
+    parser.add_argument(
+        "--batch",
+        action="append",
+        default=[],
+        metavar="DATASET:BATCH",
+        help="Only process the given batch (format: dataset:batch). "
+        "Repeatable. If omitted, all batches are processed.",
+    )
+    parser.add_argument(
+        "--annotator",
+        action="append",
+        default=[],
+        metavar="DATASET:ANNOTATOR",
+        help="Only process the given annotator (format: dataset:annotator). "
+        "Repeatable. If omitted, all annotators are processed.",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    batch_filter = _parse_colon_filter(args.batch) if args.batch else None
+    annotator_filter = _parse_colon_filter(args.annotator) if args.annotator else None
 
     bucket = os.environ["S3_BUCKET"]
     prefix = os.environ.get("S3_PREFIX", "datasets")
@@ -251,7 +328,13 @@ async def _main() -> None:
         kwargs["endpoint_url"] = endpoint_url
 
     async with session.client("s3", **kwargs) as s3_client:  # type: ignore
-        await run_clean_up(s3_client, bucket, prefix)
+        await run_clean_up(
+            s3_client,
+            bucket,
+            prefix,
+            batches=batch_filter,
+            annotators=annotator_filter,
+        )
 
 
 def main() -> None:

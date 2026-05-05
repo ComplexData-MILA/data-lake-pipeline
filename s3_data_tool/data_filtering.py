@@ -28,7 +28,7 @@ import duckdb
 from .filter import FilterNode
 from .models import Annotation, DataItem, StreamingConfigs
 from .s3_lock import S3Lock, gather_subject_to_lock_renewal, gather_subject_to_multi_lock_renewal
-from .s3_utils import enumerate_batches, transform_row_for_jsonl, upload_jsonl_chunk
+from .s3_utils import enumerate_parquet_paths, transform_row_for_jsonl, upload_jsonl_chunk
 from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
@@ -195,13 +195,20 @@ class FilterForExport:
     def base_path(self) -> str:
         return f"s3://{self._bucket}/{self._prefix}/{self._dataset_name}"
 
+    def _format_parquet_paths(self, paths: list[str]) -> str:
+        assert paths, "paths must not be empty"
+        path_list = ", ".join(f"'{p}'" for p in paths)
+        return f"[{path_list}]"
+
     def _build_filtered_cte(
         self,
         name: str,
-        path: str,
+        paths: list[str],
         columns: list[str],
         filter_node: FilterNode | None,
-    ) -> str:
+    ) -> str | None:
+        if not paths:
+            return None
         non_id_cols = [c for c in columns if c != "id"]
         select_parts = ["id"]
         for col in non_id_cols:
@@ -210,42 +217,52 @@ class FilterForExport:
         where_clause = (
             f" WHERE {filter_node.compile(set(columns))}" if filter_node else ""
         )
-        return f"{name} AS (SELECT {cols_str} FROM read_parquet('{path}'){where_clause} GROUP BY id)"
+        paths_sql = self._format_parquet_paths(paths)
+        return f"{name} AS (SELECT {cols_str} FROM read_parquet({paths_sql}){where_clause} GROUP BY id)"
 
     async def get_duckdb_query(self) -> str:
         """Generate DuckDB query with WITH clause for filtered CTEs."""
-        ctes = []
+        ctes: list[str] = []
 
-        # Base text dataset
-        base_path = f"{self.base_path}/*/merged.parquet"
-        ctes.append(
-            self._build_filtered_cte(
-                "base_filtered", base_path, self._base_columns, self._base_filter
-            )
+        base_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
+        base_cte = self._build_filtered_cte(
+            "base_filtered", base_paths, self._base_columns, self._base_filter
+        )
+        if base_cte is None:
+            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
+        ctes.append(base_cte)
 
-        # Per-annotator parquets
-        ctes.extend(
-            self._build_filtered_cte(
-                f"{_annotator}_filtered",
-                f"{self.base_path}/annotations/{_annotator}/*/merged.parquet",
-                _cols,
+        annot_results = await asyncio.gather(*[
+            enumerate_parquet_paths(
+                self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
+            )
+            for _annotator in self._annotator_columns
+        ])
+
+        active_annotators: list[str] = []
+        for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
+            if not annot_paths:
+                continue
+            cte = self._build_filtered_cte(
+                f"{_annotator}_filtered", annot_paths, _cols,
                 self._annotator_filters.get(_annotator),
             )
-            for _annotator, _cols in self._annotator_columns.items()
-        )
+            if cte is not None:
+                ctes.append(cte)
+                active_annotators.append(_annotator)
 
         select_parts = ["base_filtered.*"] + [
-            f"{a}_filtered.*" for a in self._annotator_columns
+            f"{a}_filtered.*" for a in active_annotators
         ]
 
-        if not self._annotator_columns:
+        if not active_annotators:
             return f"WITH {', '.join(ctes)} SELECT {', '.join(select_parts)} FROM base_filtered"
 
-        join_targets = [
-            f"JOIN {a}_filtered USING (id)" for a in self._annotator_columns
-        ]
-        join_clause = " ".join(join_targets)
+        join_clause = " ".join(
+            f"JOIN {a}_filtered USING (id)" for a in active_annotators
+        )
 
         return (
             f"WITH {', '.join(ctes)} SELECT {', '.join(select_parts)} "
@@ -360,82 +377,100 @@ class FilterForAnnotation(FilterForExport):
         """Stream filtered DataItems excluding already annotated rows.
 
         Args:
-            batches: If provided, query only these specific batches. Otherwise uses glob.
+            batches: If provided, query only these specific batches.
         """
+        base_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name
+        )
         if batches:
-            base_paths = [f"{self.base_path}/{b}/merged.parquet" for b in batches]
-            annotator_paths = [
-                f"{self.base_path}/annotations/{self._annotator_name}/{b}/merged.parquet"
-                for b in batches
-            ]
-            base_paths_str = ", ".join(f"'{p}'" for p in base_paths)
-            annot_paths_str = ", ".join(f"'{p}'" for p in annotator_paths)
-            base_read = f"read_parquet([{base_paths_str}])"
-            annot_read = f"read_parquet([{annot_paths_str}])"
-        else:
-            base_read = f"read_parquet('{self.base_path}/*/merged.parquet')"
-            annot_read = (
-                f"read_parquet('{self.base_path}/annotations/"
-                f"{self._annotator_name}/*/merged.parquet')"
+            base_paths = [p for p in base_paths if any(f"/{b}/" in p for b in batches)]
+        if not base_paths:
+            logger.warning("No base paths found, yielding nothing")
+            return
+
+        annotator_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name,
+            self._annotator_name,
+        )
+        if batches:
+            annotator_paths = [p for p in annotator_paths if any(f"/{b}/" in p for b in batches)]
+
+        ctes: list[str] = []
+
+        base_cte = self._build_filtered_cte(
+            "base_filtered", base_paths, self._base_columns, self._base_filter
+        )
+        if base_cte is None:
+            raise DatasetNotMergedError(
+                f"No base paths found for dataset {self._dataset_name}"
+            )
+        ctes.append(base_cte)
+
+        annot_results = await asyncio.gather(*[
+            enumerate_parquet_paths(
+                self._s3_client, self._bucket, self._prefix, self._dataset_name,
+                _annotator,
+            )
+            for _annotator in self._annotator_columns
+        ])
+
+        active_annotators: list[str] = []
+        for (_annotator, _cols), a_paths in zip(
+            self._annotator_columns.items(), annot_results
+        ):
+            if batches:
+                a_paths = [p for p in a_paths if any(f"/{b}/" in p for b in batches)]
+            if not a_paths:
+                continue
+            cte = self._build_filtered_cte(
+                f"{_annotator}_filtered", a_paths, _cols,
+                self._annotator_filters.get(_annotator),
+            )
+            if cte is not None:
+                ctes.append(cte)
+                active_annotators.append(_annotator)
+
+        anti_join = ""
+        if annotator_paths:
+            annot_paths_sql = self._format_parquet_paths(annotator_paths)
+            ctes.append(
+                f"annotator_done AS (SELECT id FROM read_parquet({annot_paths_sql}))"
+            )
+            anti_join = (
+                " LEFT JOIN annotator_done USING (id) "
+                "WHERE annotator_done.id IS NULL"
             )
 
-        non_id_cols = [c for c in self._base_columns if c != "id"]
-        select_parts = ["id"]
-        for col in non_id_cols:
-            select_parts.append(f"ANY_VALUE({col}) AS {col}")
-        cols_str = ", ".join(select_parts)
-
-        base_filter = self._base_filter
-        where_clause = (
-            f" WHERE {base_filter.compile(set(self._base_columns))}"
-            if base_filter
-            else ""
+        select_parts = ["base_filtered.*"] + [
+            f"{a}_filtered.*" for a in active_annotators
+        ]
+        join_parts = " ".join(
+            f"JOIN {a}_filtered USING (id)" for a in active_annotators
         )
 
-        query = f"""
-        WITH base_filtered AS (
-            SELECT {cols_str} FROM {base_read}{where_clause} GROUP BY id
-        ),
-        annotator_done AS (
-            SELECT id FROM {annot_read}
+        query = (
+            f"WITH {', '.join(ctes)} "
+            f"SELECT {', '.join(select_parts)} "
+            f"FROM base_filtered {join_parts}{anti_join}"
         )
-        SELECT base_filtered.*
-        FROM base_filtered
-        LEFT JOIN annotator_done USING (id)
-        WHERE annotator_done.id IS NULL
-        """
 
-        try:
-            async for item in self._execute_and_stream(query):
-                yield item
-        except Exception as e:
-            error_msg = str(e)
-            if "No files found" in error_msg and "annotations/" in error_msg:
-                fallback_query = f"""
-                WITH base_filtered AS (
-                    SELECT {cols_str} FROM {base_read}{where_clause} GROUP BY id
-                )
-                SELECT base_filtered.*
-                FROM base_filtered
-                """
-                async for item in self._execute_and_stream(fallback_query):
-                    yield item
-            else:
-                logger.error(f"Query execution failed: {e}")
+        async for item in self._execute_and_stream(query):
+            yield item
 
     async def _claim_batches(self, max_batches: int) -> list[tuple[str, S3Lock]]:
         """Try to claim up to max_batches using per-batch S3 locks.
 
         Returns list of (batch_name, lock) for successfully claimed batches.
         """
-        all_batches = await enumerate_batches(
+        base_paths = await enumerate_parquet_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
+        batch_names = list(dict.fromkeys(p.split("/")[-2] for p in base_paths))
         rng = random.Random()
-        rng.shuffle(all_batches)
+        rng.shuffle(batch_names)
 
         claimed: list[tuple[str, S3Lock]] = []
-        for batch_name in all_batches:
+        for batch_name in batch_names:
             if len(claimed) >= max_batches:
                 break
             lock_path = (

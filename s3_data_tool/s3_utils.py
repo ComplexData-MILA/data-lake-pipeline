@@ -12,7 +12,6 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel
-
 from .async_utils import with_semaphore
 from .models import RunManifest
 
@@ -238,7 +237,9 @@ async def discover_dataset_columns(
     if max_concurrency is None:
         max_concurrency = int(os.environ.get("FILTER_MAX_CONCURRENCY", "20"))
 
-    batches = await enumerate_batches(s3_client, bucket, prefix, dataset_name)
+    batches = await enumerate_batches(
+        s3_client, bucket, prefix, dataset_name
+    )
 
     if not batches:
         return set()
@@ -308,7 +309,9 @@ def merge_types(type1: pa.DataType, type2: pa.DataType) -> pa.DataType:
 
 
 async def enumerate_datasets(
-    s3_client: "S3Client", bucket: str, prefix: str
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
 ) -> list[str]:
     datasets: set[str] = set()
     list_prefix = f"{prefix.rstrip('/')}/"
@@ -325,7 +328,10 @@ async def enumerate_datasets(
 
 
 async def enumerate_batches(
-    s3_client: "S3Client", bucket: str, prefix: str, dataset_name: str
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
 ) -> list[str]:
     batches: set[str] = set()
     dataset_prefix = f"{prefix}/{dataset_name}/"
@@ -355,6 +361,52 @@ async def enumerate_annotators(
                 annotator_name = p.rstrip("/").split("/")[-1]
                 annotators.add(annotator_name)
     return sorted(annotators)
+
+
+async def enumerate_parquet_paths(
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    async for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/merged.parquet") and (
+                annotator or "/annotations/" not in key
+            ):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
+
+
+def enumerate_parquet_paths_sync(
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/merged.parquet") and (
+                annotator or "/annotations/" not in key
+            ):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
 
 
 async def iter_jsonl_rows(
