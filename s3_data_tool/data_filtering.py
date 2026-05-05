@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -26,7 +27,7 @@ import duckdb
 
 from .filter import FilterNode
 from .models import Annotation, DataItem, StreamingConfigs
-from .s3_lock import S3Lock, gather_subject_to_lock_renewal
+from .s3_lock import S3Lock, gather_subject_to_lock_renewal, gather_subject_to_multi_lock_renewal
 from .s3_utils import enumerate_parquet_paths, transform_row_for_jsonl, upload_jsonl_chunk
 from tqdm.auto import tqdm
 
@@ -357,7 +358,6 @@ class FilterForAnnotation(FilterForExport):
         annotator_filters: dict[str, FilterNode] | None = None,
         lock_ttl_ms: int = 3_600_000,
     ):
-        """Add S3 lock on top of FilterForExport."""
         super().__init__(
             s3_client,
             bucket,
@@ -369,23 +369,31 @@ class FilterForAnnotation(FilterForExport):
             annotator_filters,
         )
         self._annotator_name = annotator_name
+        self._lock_ttl_ms = lock_ttl_ms
 
-        lock_path = f"{self._prefix}/{dataset_name}/annotations/{annotator_name}"
+    async def _iter_filtered_items(
+        self, batches: list[str] | None = None
+    ) -> AsyncIterator[DataItem]:
+        """Stream filtered DataItems excluding already annotated rows.
 
-        self._lock: S3Lock = S3Lock(lock_path, lock_ttl_ms, s3_client, bucket)
-
-    async def _iter_filtered_items(self) -> AsyncIterator[DataItem]:
-        """Stream filtered DataItems excluding already annotated rows."""
+        Args:
+            batches: If provided, query only these specific batches.
+        """
         base_paths = await enumerate_parquet_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
+        if batches:
+            base_paths = [p for p in base_paths if any(f"/{b}/" in p for b in batches)]
         if not base_paths:
             logger.warning("No base paths found, yielding nothing")
             return
 
         annotator_paths = await enumerate_parquet_paths(
-            self._s3_client, self._bucket, self._prefix, self._dataset_name, self._annotator_name
+            self._s3_client, self._bucket, self._prefix, self._dataset_name,
+            self._annotator_name,
         )
+        if batches:
+            annotator_paths = [p for p in annotator_paths if any(f"/{b}/" in p for b in batches)]
 
         ctes: list[str] = []
 
@@ -393,22 +401,29 @@ class FilterForAnnotation(FilterForExport):
             "base_filtered", base_paths, self._base_columns, self._base_filter
         )
         if base_cte is None:
-            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
+            raise DatasetNotMergedError(
+                f"No base paths found for dataset {self._dataset_name}"
+            )
         ctes.append(base_cte)
 
         annot_results = await asyncio.gather(*[
             enumerate_parquet_paths(
-                self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
+                self._s3_client, self._bucket, self._prefix, self._dataset_name,
+                _annotator,
             )
             for _annotator in self._annotator_columns
         ])
 
         active_annotators: list[str] = []
-        for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
-            if not annot_paths:
+        for (_annotator, _cols), a_paths in zip(
+            self._annotator_columns.items(), annot_results
+        ):
+            if batches:
+                a_paths = [p for p in a_paths if any(f"/{b}/" in p for b in batches)]
+            if not a_paths:
                 continue
             cte = self._build_filtered_cte(
-                f"{_annotator}_filtered", annot_paths, _cols,
+                f"{_annotator}_filtered", a_paths, _cols,
                 self._annotator_filters.get(_annotator),
             )
             if cte is not None:
@@ -418,8 +433,13 @@ class FilterForAnnotation(FilterForExport):
         anti_join = ""
         if annotator_paths:
             annot_paths_sql = self._format_parquet_paths(annotator_paths)
-            ctes.append(f"annotator_done AS (SELECT id FROM read_parquet({annot_paths_sql}))")
-            anti_join = " LEFT JOIN annotator_done USING (id) WHERE annotator_done.id IS NULL"
+            ctes.append(
+                f"annotator_done AS (SELECT id FROM read_parquet({annot_paths_sql}))"
+            )
+            anti_join = (
+                " LEFT JOIN annotator_done USING (id) "
+                "WHERE annotator_done.id IS NULL"
+            )
 
         select_parts = ["base_filtered.*"] + [
             f"{a}_filtered.*" for a in active_annotators
@@ -437,52 +457,40 @@ class FilterForAnnotation(FilterForExport):
         async for item in self._execute_and_stream(query):
             yield item
 
-    async def __aenter__(self) -> "FilterForAnnotation":
-        """Acquire annotation lock."""
-        acquired = await self._lock.acquire()
-        if not acquired:
-            raise AnnotationLockError(
-                f"Failed to acquire lock for {self._annotator_name} on dataset {self._dataset_name}"
-            )
+    async def _claim_batches(self, max_batches: int) -> list[tuple[str, S3Lock]]:
+        """Try to claim up to max_batches using per-batch S3 locks.
 
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: object,
-    ) -> bool:
-        """Release annotation lock."""
-        if self._lock:
-            await self._lock.release()
-        return False
-
-    async def annotate(
-        self,
-        annotation_fn: Callable[[DataItem], Awaitable[Annotation]],
-        max_concurrency: int = 16,
-        batch: str | None = None,
-        streaming_configs: StreamingConfigs | None = None,
-    ) -> None:
-        """Annotate filtered rows using producer-processor-uploader pattern.
-
-        Spawns three types of tasks:
-        1. Producer: Feeds DataItems from dataloader into input_queue
-        2. Workers (N): Pull items, annotate, push results to output_queue
-        3. Uploader: Buffer and upload JSONL chunks to S3
-
-        Upload path: {base_path}/.temp/chunk_{chunk_idx:05d}.jsonl
-
-        Args:
-            annotation_fn: Async function to annotate each row
-            max_concurrency: Number of concurrent annotation workers
-            batch: Batch name for annotation output
-            streaming_configs: Streaming configuration (chunk_size)
+        Returns list of (batch_name, lock) for successfully claimed batches.
         """
-        streaming_configs = streaming_configs or StreamingConfigs()
+        base_paths = await enumerate_parquet_paths(
+            self._s3_client, self._bucket, self._prefix, self._dataset_name
+        )
+        batch_names = list(dict.fromkeys(p.split("/")[-2] for p in base_paths))
+        rng = random.Random()
+        rng.shuffle(batch_names)
 
-        batch_name = batch or "default"
+        claimed: list[tuple[str, S3Lock]] = []
+        for batch_name in batch_names:
+            if len(claimed) >= max_batches:
+                break
+            lock_path = (
+                f"{self._prefix}/{self._dataset_name}/annotations/"
+                f"{self._annotator_name}/{batch_name}"
+            )
+            lock = S3Lock(lock_path, self._lock_ttl_ms, self._s3_client, self._bucket)
+            if await lock.acquire():
+                claimed.append((batch_name, lock))
+        return claimed
+
+    async def _process_single_batch(
+        self,
+        batch_name: str,
+        annotation_fn: Callable[[DataItem], Awaitable[Annotation]],
+        max_concurrency: int,
+        streaming_configs: StreamingConfigs,
+        held_locks: list[S3Lock],
+    ) -> None:
+        """Process a single batch using the producer-worker-uploader pattern."""
         base_path = (
             f"{self._prefix}/{self._dataset_name}/annotations/"
             f"{self._annotator_name}/{batch_name}"
@@ -494,9 +502,9 @@ class FilterForAnnotation(FilterForExport):
             maxsize=queue_size
         )
 
-        dataloader = self._iter_filtered_items()
+        dataloader = self._iter_filtered_items(batches=[batch_name])
 
-        pbar = tqdm(desc="Annotating", ncols=80)
+        pbar = tqdm(desc=f"Annotating {batch_name}", ncols=80)
 
         producer_task = asyncio.create_task(
             produce_items_for_annotation(input_queue, dataloader, max_concurrency)
@@ -520,11 +528,58 @@ class FilterForAnnotation(FilterForExport):
             )
         )
 
-        results = await gather_subject_to_lock_renewal(
-            self._lock,
-            [producer_task, *worker_tasks, uploader_task],
-        )
+        if len(held_locks) == 1:
+            results = await gather_subject_to_lock_renewal(
+                held_locks[0],
+                [producer_task, *worker_tasks, uploader_task],
+            )
+        else:
+            results = await gather_subject_to_multi_lock_renewal(
+                held_locks,
+                [producer_task, *worker_tasks, uploader_task],
+            )
         pbar.close()
         errors = [f"{r.__traceback__}" for r in results if isinstance(r, BaseException)]
         if errors:
             logger.warning(f"Errors encountered: \n{"\n".join(errors)}")
+
+    async def annotate(
+        self,
+        annotation_fn: Callable[[DataItem], Awaitable[Annotation]],
+        max_concurrency: int = 16,
+        max_batches: int = 1,
+        streaming_configs: StreamingConfigs | None = None,
+    ) -> None:
+        """Annotate filtered rows using producer-processor-uploader pattern.
+
+        Batches are auto-claimed via per-batch S3 locks: up to ``max_batches``
+        are claimed and processed sequentially. Multiple instances running the
+        same annotator naturally partition the work — each instance claims
+        disjoint batches via the lock mechanism.
+
+        Args:
+            annotation_fn: Async function to annotate each row
+            max_concurrency: Number of concurrent annotation workers
+            max_batches: Maximum batches to claim (default 1).
+            streaming_configs: Streaming configuration (chunk_size)
+        """
+        streaming_configs = streaming_configs or StreamingConfigs()
+
+        claimed = await self._claim_batches(max_batches)
+        if not claimed:
+            logger.info(
+                f"No unclaimed batches for {self._annotator_name} "
+                f"on {self._dataset_name}"
+            )
+            return
+
+        held_locks = [l for _, l in claimed]
+        try:
+            for batch_name, _ in claimed:
+                await self._process_single_batch(
+                    batch_name, annotation_fn, max_concurrency,
+                    streaming_configs, held_locks,
+                )
+        finally:
+            for lock in held_locks:
+                await lock.release()
