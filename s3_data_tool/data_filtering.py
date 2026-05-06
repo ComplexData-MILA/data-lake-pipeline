@@ -474,10 +474,12 @@ class FilterForAnnotation(FilterForExport):
         )
 
         if self._fraction < 1.0:
+            threshold = int(self._fraction * 1_000_000)
+            clause = f"ABS(hash(id::VARCHAR)) % 1000000 < {threshold}"
             if "WHERE" in query:
-                query += f" AND random() < {self._fraction}"
+                query += f" AND {clause}"
             else:
-                query += f" WHERE random() < {self._fraction}"
+                query += f" WHERE {clause}"
 
         async for item in self._execute_and_stream(query):
             yield item
