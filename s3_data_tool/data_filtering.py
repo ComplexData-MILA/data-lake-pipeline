@@ -26,9 +26,16 @@ from typing import TYPE_CHECKING, Any, Mapping
 import duckdb
 
 from .filter import FilterNode
-from .models import Annotation, DataItem, StreamingConfigs
+from .models import Annotation, AnnotationManifest, DataItem, StreamingConfigs
 from .s3_lock import S3Lock, gather_subject_to_lock_renewal, gather_subject_to_multi_lock_renewal
-from .s3_utils import enumerate_parquet_paths, transform_row_for_jsonl, upload_jsonl_chunk
+from .s3_utils import (
+    annotation_manifest_key,
+    enumerate_parquet_paths,
+    s3_object_exists,
+    transform_row_for_jsonl,
+    upload_annotation_manifest,
+    upload_jsonl_chunk,
+)
 from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
@@ -120,15 +127,18 @@ async def upload_annotation_results(
     base_path: str,
     chunk_size: int,
     num_workers: int,
-) -> None:
+) -> int:
     """Uploader task: Buffer results and upload JSONL chunks.
 
     Exits after receiving all worker sentinels. Upload path:
         {base_path}/.temp/chunk_{chunk_idx:05d}.jsonl
+
+    Returns the total number of annotated items.
     """
     buffer: list[dict[str, Any]] = []
     chunk_idx = 0
     workers_done = 0
+    count = 0
 
     while workers_done < num_workers:
         result = await output_queue.get()
@@ -137,6 +147,7 @@ async def upload_annotation_results(
             output_queue.task_done()
             continue
 
+        count += 1
         buffer.append(result)
         if len(buffer) >= chunk_size:
             key = f"{base_path}/.temp/chunk_{chunk_idx:05d}.jsonl"
@@ -150,6 +161,8 @@ async def upload_annotation_results(
         key = f"{base_path}/.temp/chunk_{chunk_idx:05d}.jsonl"
         await upload_jsonl_chunk(s3_client, bucket, key, buffer)
         logger.info(f"Uploaded final annotation chunk: {key}")
+
+    return count
 
 
 async def _annotate_single_row(
@@ -460,6 +473,7 @@ class FilterForAnnotation(FilterForExport):
     async def _claim_batches(self, max_batches: int) -> list[tuple[str, S3Lock]]:
         """Try to claim up to max_batches using per-batch S3 locks.
 
+        Skips batches that have an annotation manifest (already fully annotated).
         Returns list of (batch_name, lock) for successfully claimed batches.
         """
         base_paths = await enumerate_parquet_paths(
@@ -473,6 +487,13 @@ class FilterForAnnotation(FilterForExport):
         for batch_name in batch_names:
             if len(claimed) >= max_batches:
                 break
+
+            manifest_key = annotation_manifest_key(
+                self._prefix, self._dataset_name, self._annotator_name, batch_name
+            )
+            if await s3_object_exists(self._s3_client, self._bucket, manifest_key):
+                continue
+
             lock_path = (
                 f"{self._prefix}/{self._dataset_name}/annotations/"
                 f"{self._annotator_name}/{batch_name}"
@@ -489,8 +510,11 @@ class FilterForAnnotation(FilterForExport):
         max_concurrency: int,
         streaming_configs: StreamingConfigs,
         held_locks: list[S3Lock],
-    ) -> None:
-        """Process a single batch using the producer-worker-uploader pattern."""
+    ) -> int:
+        """Process a single batch using the producer-worker-uploader pattern.
+
+        Returns the number of annotated items.
+        """
         base_path = (
             f"{self._prefix}/{self._dataset_name}/annotations/"
             f"{self._annotator_name}/{batch_name}"
@@ -543,6 +567,9 @@ class FilterForAnnotation(FilterForExport):
         if errors:
             logger.warning(f"Errors encountered: \n{"\n".join(errors)}")
 
+        uploader_result = [r for r in results if not isinstance(r, BaseException) and r is not None]
+        return uploader_result[0] if uploader_result else 0
+
     async def annotate(
         self,
         annotation_fn: Callable[[DataItem], Awaitable[Annotation]],
@@ -576,9 +603,23 @@ class FilterForAnnotation(FilterForExport):
         held_locks = [l for _, l in claimed]
         try:
             for batch_name, _ in claimed:
-                await self._process_single_batch(
+                count = await self._process_single_batch(
                     batch_name, annotation_fn, max_concurrency,
                     streaming_configs, held_locks,
+                )
+                manifest_key = annotation_manifest_key(
+                    self._prefix, self._dataset_name,
+                    self._annotator_name, batch_name,
+                )
+                manifest = AnnotationManifest(
+                    annotator_name=self._annotator_name,
+                    dataset_name=self._dataset_name,
+                    batch_name=batch_name,
+                    num_annotated=count,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await upload_annotation_manifest(
+                    self._s3_client, self._bucket, manifest_key, manifest,
                 )
         finally:
             for lock in held_locks:

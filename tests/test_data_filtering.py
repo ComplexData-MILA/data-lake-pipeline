@@ -14,7 +14,7 @@ import pytest_asyncio
 
 from s3_data_tool.filter import AllFilter, BooleanFilter
 
-from s3_data_tool.dataset_generator import _transform_row_for_jsonl
+from s3_data_tool.s3_utils import transform_row_for_jsonl as _transform_row_for_jsonl
 from s3_data_tool.models import Annotation, DataItem
 
 
@@ -586,6 +586,208 @@ class TestAnnotationView:
                 await view.annotate(annotator)
 
             await client.delete_object(Bucket=bucket, Key=marker_key)
+
+
+    async def test_annotate_writes_manifest(self, s3_setup):
+        """Test that successful annotation writes an annotation manifest."""
+        from s3_data_tool.data_filtering import FilterForAnnotation
+        from s3_data_tool.s3_utils import (
+            annotation_manifest_key,
+            read_annotation_manifest,
+        )
+
+        session, kwargs, bucket, prefix = s3_setup
+        test_id = str(uuid.uuid4())[:8]
+        dataset_name = f"ann_manifest_test_{test_id}"
+
+        dataset_rows = [
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+            {"id": "2", "text": "World", "_batch": "batch1"},
+        ]
+
+        async with session.client("s3", **kwargs) as client:
+            try:
+                key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
+                buf = create_parquet_buffer(dataset_rows)
+                await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
+
+                view = FilterForAnnotation(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text"],
+                )
+
+                async def annotator(item: DataItem) -> Annotation:
+                    return Annotation(data={"label": f"label_{item.id}"})
+
+                async with view:
+                    await view.annotate(annotator)
+
+                manifest_key = annotation_manifest_key(
+                    prefix, dataset_name, "test_annotator", "batch1"
+                )
+                manifest = await read_annotation_manifest(client, bucket, manifest_key)
+                assert manifest is not None
+                assert manifest.annotator_name == "test_annotator"
+                assert manifest.dataset_name == dataset_name
+                assert manifest.batch_name == "batch1"
+                assert manifest.num_annotated == 2
+
+            finally:
+                paginator = client.get_paginator("list_objects_v2")
+                keys_to_delete = []
+                async for page in paginator.paginate(
+                    Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"
+                ):
+                    for obj in page.get("Contents", []):
+                        keys_to_delete.append(obj["Key"])
+                for k in keys_to_delete:
+                    await client.delete_object(Bucket=bucket, Key=k)
+
+    async def test_annotate_skips_batch_with_manifest(self, s3_setup):
+        """Test that a batch with a manifest is skipped entirely."""
+        from s3_data_tool.data_filtering import FilterForAnnotation
+        from s3_data_tool.models import AnnotationManifest
+        from s3_data_tool.s3_utils import (
+            annotation_manifest_key,
+            upload_annotation_manifest,
+        )
+        from datetime import datetime, timezone
+
+        session, kwargs, bucket, prefix = s3_setup
+        test_id = str(uuid.uuid4())[:8]
+        dataset_name = f"ann_skip_manifest_test_{test_id}"
+
+        dataset_rows = [
+            {"id": "1", "text": "Hello", "_batch": "batch1"},
+            {"id": "2", "text": "World", "_batch": "batch1"},
+        ]
+
+        async with session.client("s3", **kwargs) as client:
+            try:
+                key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
+                buf = create_parquet_buffer(dataset_rows)
+                await client.put_object(Bucket=bucket, Key=key, Body=buf.read())
+
+                # Pre-create a manifest to simulate a completed annotation run
+                manifest_key = annotation_manifest_key(
+                    prefix, dataset_name, "test_annotator", "batch1"
+                )
+                manifest = AnnotationManifest(
+                    annotator_name="test_annotator",
+                    dataset_name=dataset_name,
+                    batch_name="batch1",
+                    num_annotated=2,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await upload_annotation_manifest(client, bucket, manifest_key, manifest)
+
+                view = FilterForAnnotation(
+                    client,
+                    bucket,
+                    prefix,
+                    dataset_name,
+                    "test_annotator",
+                    base_columns=["id", "text"],
+                )
+
+                call_count = 0
+
+                async def annotator(item: DataItem) -> Annotation:
+                    nonlocal call_count
+                    call_count += 1
+                    return Annotation(data={"label": "new"})
+
+                async with view:
+                    await view.annotate(annotator)
+
+                # Manifest existed, so batch should be skipped entirely
+                assert call_count == 0
+
+            finally:
+                paginator = client.get_paginator("list_objects_v2")
+                keys_to_delete = []
+                async for page in paginator.paginate(
+                    Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"
+                ):
+                    for obj in page.get("Contents", []):
+                        keys_to_delete.append(obj["Key"])
+                for k in keys_to_delete:
+                    await client.delete_object(Bucket=bucket, Key=k)
+
+    async def test_merge_dataset_batch_deletes_annotation_manifests(self, s3_setup):
+        """Test that merge_dataset_batch deletes annotation manifests when
+        new base data is added."""
+        from s3_data_tool.clean_up import merge_dataset_batch
+        from s3_data_tool.models import AnnotationManifest
+        from s3_data_tool.s3_utils import (
+            annotation_manifest_key,
+            s3_object_exists,
+            upload_annotation_manifest,
+        )
+        from datetime import datetime, timezone
+
+        session, kwargs, bucket, prefix = s3_setup
+        test_id = str(uuid.uuid4())[:8]
+        dataset_name = f"ann_invalidate_test_{test_id}"
+
+        async with session.client("s3", **kwargs) as client:
+            try:
+                # Create existing base parquet
+                dataset_rows = [
+                    {"id": "1", "text": "Hello", "_batch": "batch1"},
+                ]
+                ds_key = f"{prefix}/{dataset_name}/batch1/merged.parquet"
+                buf = create_parquet_buffer(dataset_rows)
+                await client.put_object(Bucket=bucket, Key=ds_key, Body=buf.read())
+
+                # Create annotation manifest (simulating prior completed annotation)
+                manifest_key = annotation_manifest_key(
+                    prefix, dataset_name, "test_annotator", "batch1"
+                )
+                manifest = AnnotationManifest(
+                    annotator_name="test_annotator",
+                    dataset_name=dataset_name,
+                    batch_name="batch1",
+                    num_annotated=1,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await upload_annotation_manifest(client, bucket, manifest_key, manifest)
+
+                # Verify manifest exists
+                assert await s3_object_exists(client, bucket, manifest_key)
+
+                # Simulate new data arriving: add a JSONL chunk to the batch
+                jsonl_key = f"{prefix}/{dataset_name}/batch1/new_chunk_00000.jsonl"
+                import json
+                await client.put_object(
+                    Bucket=bucket,
+                    Key=jsonl_key,
+                    Body=(json.dumps({"id": "2", "text": "New", "_batch": "batch1"})
+                          .encode("utf-8")),
+                )
+
+                # Run merge_dataset_batch — should merge the JSONL and delete
+                # annotation manifests since base data changed
+                batch_prefix = f"{prefix}/{dataset_name}/batch1"
+                await merge_dataset_batch(client, bucket, batch_prefix)
+
+                # Manifest should be deleted after merge
+                assert not await s3_object_exists(client, bucket, manifest_key)
+
+            finally:
+                paginator = client.get_paginator("list_objects_v2")
+                keys_to_delete = []
+                async for page in paginator.paginate(
+                    Bucket=bucket, Prefix=f"{prefix}/{dataset_name}"
+                ):
+                    for obj in page.get("Contents", []):
+                        keys_to_delete.append(obj["Key"])
+                for k in keys_to_delete:
+                    await client.delete_object(Bucket=bucket, Key=k)
 
 
 class TestDeserializeJsonFields:
