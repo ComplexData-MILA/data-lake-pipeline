@@ -233,13 +233,17 @@ class FilterForExport:
         paths_sql = self._format_parquet_paths(paths)
         return f"{name} AS (SELECT {cols_str} FROM read_parquet({paths_sql}){where_clause} GROUP BY id)"
 
-    async def get_duckdb_query(self) -> str:
+    async def get_duckdb_query(self, batches: list[str] | None = None) -> str:
         """Generate DuckDB query with WITH clause for filtered CTEs."""
         ctes: list[str] = []
 
         base_paths = await enumerate_parquet_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
+        if batches:
+            base_paths = [p for p in base_paths if any(f"/{b}/" in p for b in batches)]
+        if not base_paths:
+            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
         base_cte = self._build_filtered_cte(
             "base_filtered", base_paths, self._base_columns, self._base_filter
         )
@@ -256,6 +260,8 @@ class FilterForExport:
 
         active_annotators: list[str] = []
         for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
+            if batches:
+                annot_paths = [p for p in annot_paths if any(f"/{b}/" in p for b in batches)]
             if not annot_paths:
                 continue
             cte = self._build_filtered_cte(
@@ -282,9 +288,15 @@ class FilterForExport:
             f"FROM base_filtered {join_clause}"
         )
 
-    async def _iter_filtered_items(self) -> AsyncIterator[DataItem]:
-        """Stream filtered DataItems using DuckDB query."""
-        query = await self.get_duckdb_query()
+    async def _iter_filtered_items(
+        self, batches: list[str] | None = None
+    ) -> AsyncIterator[DataItem]:
+        """Stream filtered DataItems using DuckDB query.
+
+        Args:
+            batches: If provided, query only these specific batches.
+        """
+        query = await self.get_duckdb_query(batches=batches)
         logger.debug(f"Executing DuckDB query: {query}")
         try:
             async for item in self._execute_and_stream(query):

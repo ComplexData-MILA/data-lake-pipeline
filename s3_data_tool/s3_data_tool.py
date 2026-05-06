@@ -1,6 +1,7 @@
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from typing import Any
 
 import aioboto3
@@ -79,7 +80,10 @@ class S3DataTool:
     async def filter_for_export(
         self,
         name: str,
-        filter: FilterNode | None = None,
+        base_columns: list[str],
+        annotator_columns: Mapping[str, list[str]] | None = None,
+        base_filter: FilterNode | None = None,
+        annotator_filters: Mapping[str, FilterNode] | None = None,
     ) -> AsyncIterator[FilterForExport]:
         """Create read-only export view with optional filter."""
         kwargs: dict[str, Any] = {}
@@ -87,6 +91,15 @@ class S3DataTool:
             kwargs["endpoint_url"] = self._endpoint_url
 
         async with self._session.client("s3", **kwargs) as s3_client:  # type: ignore
-            view = FilterForExport(s3_client, self._bucket, self._prefix, name, filter)
+            view = FilterForExport(
+                s3_client,
+                self._bucket,
+                self._prefix,
+                dataset_name=name,
+                base_columns=base_columns,
+                annotator_columns=annotator_columns,
+                base_filter=base_filter,
+                annotator_filters=annotator_filters,
+            )
             async with view:
                 yield view
