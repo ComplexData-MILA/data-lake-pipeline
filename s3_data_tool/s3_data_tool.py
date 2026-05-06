@@ -51,6 +51,7 @@ class S3DataTool:
         base_filter: FilterNode | None = None,
         annotator_filters: dict[str, FilterNode] | None = None,
         lock_ttl_ms: int = 3600000,
+        fraction: float = 1.0,
     ) -> AsyncIterator[FilterForAnnotation]:
         """Create annotation view with optional filter."""
         kwargs: dict[str, Any] = {}
@@ -69,6 +70,7 @@ class S3DataTool:
                 base_filter=base_filter,
                 annotator_filters=annotator_filters,
                 lock_ttl_ms=lock_ttl_ms,
+                fraction=fraction,
             )
             async with view:
                 yield view
