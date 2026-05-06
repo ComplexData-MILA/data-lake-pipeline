@@ -357,7 +357,12 @@ class FilterForAnnotation(FilterForExport):
         base_filter: FilterNode | None = None,
         annotator_filters: dict[str, FilterNode] | None = None,
         lock_ttl_ms: int = 3_600_000,
+        fraction: float = 1.0,
     ):
+        if not 0 < fraction <= 1.0:
+            raise ValueError(
+                f"fraction must be in (0.0, 1.0], got {fraction}"
+            )
         super().__init__(
             s3_client,
             bucket,
@@ -370,6 +375,7 @@ class FilterForAnnotation(FilterForExport):
         )
         self._annotator_name = annotator_name
         self._lock_ttl_ms = lock_ttl_ms
+        self._fraction = fraction
 
     async def _iter_filtered_items(
         self, batches: list[str] | None = None
@@ -453,6 +459,12 @@ class FilterForAnnotation(FilterForExport):
             f"SELECT {', '.join(select_parts)} "
             f"FROM base_filtered {join_parts}{anti_join}"
         )
+
+        if self._fraction < 1.0:
+            if "WHERE" in query:
+                query += f" AND random() < {self._fraction}"
+            else:
+                query += f" WHERE random() < {self._fraction}"
 
         async for item in self._execute_and_stream(query):
             yield item
