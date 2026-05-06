@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel
 from .async_utils import with_semaphore
-from .models import RunManifest
+from .models import AnnotationManifest, RunManifest
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
@@ -164,6 +164,45 @@ async def s3_object_exists(s3_client: "S3Client", bucket: str, key: str) -> bool
         return False
     except s3_client.exceptions.NoSuchKey:
         return False
+
+
+async def upload_annotation_manifest(
+    s3_client: "S3Client",
+    bucket: str,
+    key: str,
+    manifest: AnnotationManifest,
+) -> None:
+    """Write an annotation manifest to S3."""
+    body = manifest.model_dump_json()
+    await s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body.encode("utf-8"),
+    )
+
+
+async def read_annotation_manifest(
+    s3_client: "S3Client",
+    bucket: str,
+    key: str,
+) -> AnnotationManifest | None:
+    """Read an annotation manifest from S3, or None if it doesn't exist."""
+    try:
+        response = await s3_client.get_object(Bucket=bucket, Key=key)
+        body = await response["Body"].read()
+        return AnnotationManifest(**json.loads(body))
+    except Exception:
+        return None
+
+
+def annotation_manifest_key(
+    prefix: str, dataset_name: str, annotator_name: str, batch_name: str
+) -> str:
+    """Build the S3 key for an annotation manifest."""
+    return (
+        f"{prefix}/{dataset_name}/annotations/{annotator_name}/"
+        f"{batch_name}/annotation_manifest.json"
+    )
 
 
 async def read_parquet_columns(

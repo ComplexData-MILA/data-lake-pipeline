@@ -13,6 +13,7 @@ from .models import RunManifest
 from .s3_lock import S3Lock
 from .s3_utils import (
     MergeCandidate,
+    annotation_manifest_key,
     async_write_parquet,
     delete_objects,
     discover_schema,
@@ -21,6 +22,7 @@ from .s3_utils import (
     enumerate_datasets,
     iter_jsonl_rows,
     iter_parquet_rows,
+    s3_object_exists,
 )
 
 if TYPE_CHECKING:
@@ -146,6 +148,25 @@ async def merge_dataset_batch(
     )
     keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + [temp_key]
     await delete_objects(s3_client, bucket, keys_to_delete)
+
+    # New base data invalidates annotation manifests — delete them so
+    # annotators re-evaluate this batch next session.
+    prefix_parts = batch_prefix.rsplit("/", 2)
+    ann_prefix = prefix_parts[0]
+    dataset = prefix_parts[1]
+    batch = prefix_parts[2]
+    annotators = await enumerate_annotators(s3_client, bucket, ann_prefix, dataset)
+    manifest_keys = []
+    for annotator in annotators:
+        key = annotation_manifest_key(ann_prefix, dataset, annotator, batch)
+        if await s3_object_exists(s3_client, bucket, key):
+            manifest_keys.append(key)
+    if manifest_keys:
+        await delete_objects(s3_client, bucket, manifest_keys)
+        logger.info(
+            f"Deleted {len(manifest_keys)} annotation manifests for "
+            f"{dataset}/{batch}"
+        )
 
     logger.info(
         f"Merged {batch_prefix}: {len(candidate.jsonl_keys)} JSONL files, "
