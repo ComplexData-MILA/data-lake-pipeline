@@ -38,6 +38,14 @@ def transform_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
     return transformed
 
 
+def serialize_complex_values(row: dict[str, Any]) -> dict[str, Any]:
+    """Serialize list and dict values to JSON strings so they can be stored in Parquet string columns."""
+    for key, value in row.items():
+        if isinstance(value, (dict, list)):
+            row[key] = json.dumps(value, separators=(",", ":"))
+    return row
+
+
 async def upload_run_manifest(
     s3_client: "S3Client",
     bucket: str,
@@ -588,6 +596,7 @@ async def write_parquet(
     row_count = 0
     with pq.ParquetWriter(buf, schema) as writer:
         for batch_rows in batched_rows(row_iter, batch_size):
+            batch_rows = [serialize_complex_values(r) for r in batch_rows]
             batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
             writer.write_batch(batch)
             row_count += len(batch_rows)
@@ -617,6 +626,7 @@ async def async_write_parquet(
 
         with pq.ParquetWriter(f, schema) as writer:
             async for batch_rows in async_batched_rows(row_iter, batch_size):
+                batch_rows = [serialize_complex_values(r) for r in batch_rows]
                 batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
                 writer.write_batch(batch)
                 row_count += len(batch_rows)
