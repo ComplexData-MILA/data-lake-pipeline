@@ -38,10 +38,25 @@ def transform_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
     return transformed
 
 
-def serialize_complex_values(row: dict[str, Any]) -> dict[str, Any]:
-    """Serialize list and dict values to JSON strings so they can be stored in Parquet string columns."""
+def serialize_row_for_schema(row: dict[str, Any], schema: pa.Schema) -> dict[str, Any]:
+    """Serialize values to match their target Parquet column type.
+
+    When the target column is a string type, list/dict values are JSON-serialized
+    and non-string scalars are converted so they can be stored. This handles the
+    case where schema merging fell back to string for columns with conflicting
+    types across files.
+    """
     for key, value in row.items():
+        if key not in schema.names:
+            continue
+        target_type = schema.field(key).type
+        if not (pa.types.is_string(target_type) or pa.types.is_large_string(target_type)):
+            continue
+        if value is None:
+            continue
         if isinstance(value, (dict, list)):
+            row[key] = json.dumps(value, separators=(",", ":"))
+        elif not isinstance(value, str):
             row[key] = json.dumps(value, separators=(",", ":"))
     return row
 
@@ -596,7 +611,7 @@ async def write_parquet(
     row_count = 0
     with pq.ParquetWriter(buf, schema) as writer:
         for batch_rows in batched_rows(row_iter, batch_size):
-            batch_rows = [serialize_complex_values(r) for r in batch_rows]
+            batch_rows = [serialize_row_for_schema(r, schema) for r in batch_rows]
             batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
             writer.write_batch(batch)
             row_count += len(batch_rows)
@@ -626,7 +641,7 @@ async def async_write_parquet(
 
         with pq.ParquetWriter(f, schema) as writer:
             async for batch_rows in async_batched_rows(row_iter, batch_size):
-                batch_rows = [serialize_complex_values(r) for r in batch_rows]
+                batch_rows = [serialize_row_for_schema(r, schema) for r in batch_rows]
                 batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
                 writer.write_batch(batch)
                 row_count += len(batch_rows)
