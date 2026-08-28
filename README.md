@@ -1,6 +1,6 @@
 # Distributed S3 Dataset Tool
 
-Library for creating and annotating text-heavy datasets. This library uses S3 and parquet as storage backends, and supports a distributed computing setup- dataset created on one server might be annotated on another.
+Library for creating and annotating text-heavy datasets. This library uses S3 as its storage backend, with merged datasets stored as id-sorted gzipped NDJSON blocks (parquet retained for legacy data and oversized datasets), and supports a distributed computing setup- dataset created on one server might be annotated on another.
 
 ## Design Choices
 
@@ -179,10 +179,18 @@ If the dataset parquet file does not exist (e.g., jsonl chunks are produced but 
         - 123abc.manifest.json
         - 123abc_chunk_00000.jsonl
         - ...
-        # Merged files
-        - merged.parquet
+        # Merged files: id-sorted gzipped NDJSON blocks (50k rows each) for
+        # datasets under JSONL_MERGE_MAX_DATASET_BYTES, else merged.parquet
+        - merged_00000.jsonl.gz
+        - merged_00001.jsonl.gz
+        - merged.parquet          # legacy / oversized datasets only
         - manifest.yaml
         # Annotations for this batch
+    - _index/
+        - batch_name.parquet      # sorted (id, _batch) index partition
+        - batch_name.meta.json    # row counts, id ranges, block list
+    - _migration/
+        - status.json             # parquet->JSONL conversion progress
     - annotations/
         - annotator_name/
             - .temp/
@@ -192,6 +200,136 @@ If the dataset parquet file does not exist (e.g., jsonl chunks are produced but 
             - batch_name/ # one folder per dataset batch
                 - manifest.yaml
                 - ...
-                # Merged files
+                # Merged files (same block/parquet convention as base)
+                - merged_00000.jsonl.gz
                 - merged.parquet
 ```
+
+## Viewer (web interface)
+
+`viewer/` is a React + FastAPI web UI for browsing datasets. It reads merged
+data (id-sorted gzipped JSONL blocks, with parquet for legacy/oversized
+batches) and unmerged JSONL chunks **directly from S3** (live rows appear the
+instant chunks are uploaded — no clean-up needed), uses Redis for metadata
+caching and real-time events, and maintains a per-batch index plus a
+materialized-ordering cache so every view paginates in bounded memory on
+10M+ row datasets.
+
+### Architecture
+
+```
+browser ──HTTPS──> [institutional reverse proxy] ──HTTP──> nginx (:8080)
+                                                             ├── /api/ ──> FastAPI backend (:8000)
+                                                             └── /api/events (SSE, unbuffered)
+FastAPI backend ──> S3 (parquet + live JSONL, via DuckDB httpfs + boto3)
+                └──> Redis (metadata cache + viewer:events pub/sub)
+
+writers (s3_data_tool): dataset_generator / clean_up
+  └── VIEWER_REDIS_URL set? ──> publish to Redis viewer:events (best-effort)
+S3 watcher (in the backend): polls listings of datasets with SSE subscribers
+  and emits events when objects change — the PRIMARY producer when writers
+  cannot reach Redis (e.g., firewalled deployments)
+```
+
+- **Query engine**: persistent DuckDB pool (viewer/backend/db.py) with a
+  disk httpfs cache (`DUCKDB_CACHE_DIR`), a per-connection memory limit
+  (`DUCKDB_MEMORY_LIMIT`, default 2GB — big sorts/aggregations spill to disk),
+  and a bounded pool-acquire timeout (503 instead of hanging under load);
+  all filter values are bound params, all identifiers validated/quoted
+  (no SQL injection).
+- **Live reads**: every query unions the merged files (parquet or JSONL
+  blocks) with unmerged `*_chunk_*.jsonl` (and annotation `.temp` chunks);
+  the GROUP BY dedup absorbs chunk/merged overlap.
+- **Merged JSONL blocks** (`merged_*.jsonl.gz`): clean-up merges each batch
+  into id-sorted gzipped NDJSON blocks of ~50k rows for datasets under
+  `JSONL_MERGE_MAX_DATASET_BYTES` (default 10GB); larger datasets keep
+  parquet. Block id-ranges in `_index/{batch}.meta.json` let a keyset page
+  fetch only the blocks its window intersects.
+- **Dataset index** (`_index/{batch}.parquet` + `.meta.json`): maintained by
+  `s3-data-tool-clean-up` on every batch merge. Enables keyset pagination
+  (`/data?cursor=…`), the index-backed count, and per-batch file pruning.
+- **Ordering cache** (filtered/sorted views): the first request for a
+  (filters, sort) combination materializes the ordered id list once
+  (`DUCKDB_CACHE_DIR/orderings/…`, 30s TTL) — pages and counts then walk it
+  with `[order_hash, position]` cursors instead of re-scanning the dataset.
+- **Conversion progress**: `GET /datasets/{d}/conversion` reports parquet→
+  JSONL migration progress from `_migration/status.json`; the UI shows a
+  banner while a conversion job is running.
+- **Streaming**: `/data?format=ndjson` streams rows as NDJSON
+  (`meta`/`row`/`done`/`error` lines) for API consumers (bounded queue with
+  backpressure); the UI itself pages with keyset cursors. `GET /events`
+  streams ingestion events as SSE (`connected` first, then
+  `rows_ingested` / `run_completed` / `batch_merged` / `annotation_updated`
+  / `conversion_progress`). A subscription with an empty `dataset` filter
+  watches **all** datasets (the watcher expands it via the dataset list).
+- **Dashboard charts** (from the `_created_at` column the pipeline now
+  injects on every row; rows ingested before the field existed are ignored):
+  - `GET /activity?bucket=1m&minutes=1440` — rows created per time bucket
+    for every dataset (id/batch-deduped, `_created_at`-normalized across the
+    parquet/JSONL encodings).
+  - `GET /datasets/{d}/categorical?column=X&mode=counts|trend&limit=20` —
+    top-K value counts, or per-bucket counts of the top-K categories
+    (`trend`, `bucket`-bucketed; non-top values fold into `other`).
+  - Both are Redis-cached and invalidated by data events; both return empty
+    results (not errors) for datasets with no `_created_at` rows.
+- **UI**: the Data tab shows all base columns by default (omitting
+  `columns` selects the full schema server-side) and infinite-scrolls with
+  virtualized rows via keyset cursors; the Activity and Charts tabs are
+  plotly.js views, lazily loaded.
+
+### Redis keys
+
+All scoped by `S3_BUCKET:S3_PREFIX`:
+
+| Key | TTL | Content |
+|---|---|---|
+| `viewer:{scope}:datasets` | 60s | dataset list |
+| `viewer:{scope}:{d}:annotators` | 60s | annotator list |
+| `viewer:{scope}:{d}:schema:{hash}` | 300s | column list (per annotator-set hash) |
+| `viewer:{scope}:{d}:files` | 5s | FileManifest (S3 listing) |
+| `viewer:{scope}:{d}:count:{hash}` | 30s | row count (per filter hash) |
+| `viewer:{scope}:activity:{hash}` | 60s | per-dataset activity buckets |
+| `viewer:{scope}:{d}:categorical:{hash}` | 300s | categorical counts/trend results |
+| `viewer:{scope}:{d}:index_meta` | — | per-batch index metadata (Phase 5) |
+| `viewer:watcher:leader` | 10s | watcher leader election |
+
+Schema/count keys are also registered in `{d}:schema_keys` / `{d}:count_keys`
+SETs so event-driven invalidation can clear all variants.
+
+### Reverse proxy assumptions
+
+TLS terminates upstream (institutional proxy). nginx listens on :80 and sets
+`X-Forwarded-For` / `X-Forwarded-Proto`; uvicorn runs with `--proxy-headers`.
+The upstream proxy must NOT buffer `/api/events` (SSE); nginx already sets
+`proxy_buffering off` for it. If the viewer is exposed behind another hop,
+repeat that setting there.
+
+### Ops notes
+
+- Deploy: `cd viewer && docker compose up -d --build` (backend + frontend +
+  redis). Env file: `viewer/backend/.prod.env` (see `.prod.env.example`).
+- Clean-up cron is unchanged (`uv run --env-file .env s3-data-tool-clean-up`);
+  each merge now also refreshes the dataset index partition and writes merged
+  data as JSONL blocks (unless the dataset is over the size threshold).
+- Conversion cron: `uv run --env-file .env s3-data-tool-convert` migrates
+  legacy `merged.parquet` to JSONL blocks for datasets under
+  `CONVERT_MAX_DATASET_BYTES` (default 10GB), updating
+  `_migration/status.json` per batch; run it alongside clean-up until the
+  backlog is converted. Idempotent and resumable.
+- Set `VIEWER_REDIS_URL` in writer environments to push events directly;
+  otherwise the backend's S3 watcher (5s poll) covers real-time updates.
+- Latency tracking: `python scripts/bench_viewer.py --base-url http://localhost:8080/api`
+  (p50/p95 per endpoint); backend request timings with `VIEWER_LOG_TIMINGS=1`.
+
+### Troubleshooting
+
+- **SSE stuck at "connected"**: a proxy between the browser and nginx is
+  buffering `/api/events` — disable buffering for that path.
+- **Stale counts after ingestion**: normal — counts are cached up to 30s and
+  invalidated by events (or the watcher); the UI shows a live-data hint.
+- **One DuckDB cache dir per backend instance**: `DUCKDB_CACHE_DIR` must be
+  unique per process (DuckDB file lock); the compose volume handles this.
+- **Tests that need S3**: run them against a disposable bucket — the
+  fixtures delete everything in the configured bucket/prefix, so never point
+  them at a real one (e.g. the jump host's `dry-run-20260401` bucket on
+  arbutus-s3).

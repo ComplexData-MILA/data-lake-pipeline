@@ -106,7 +106,7 @@ export function RowDetailModal() {
     setLoading(true);
     setError(null);
     fetchRow(dataset, selectedId, {
-      columns: baseColumns.length > 0 ? baseColumns : ["id", "_batch"],
+      columns: baseColumns.length > 0 ? baseColumns : [],
       annotatorColumns,
     })
       .then((res) => setRow(res.rows[0]))
@@ -124,7 +124,9 @@ export function RowDetailModal() {
     if (baseColumns.length > 0) {
       cols.push(...baseColumns);
     } else if (row) {
-      const rowCols = Object.keys(row).filter(c => !c.includes(".") && c !== "_batch");
+      const rowCols = Object.keys(row).filter(
+        (c) => !c.includes(".") && c !== "_batch" && c !== "_created_at"
+      );
       cols.push(...rowCols);
     } else {
       cols.push("id", "_batch");

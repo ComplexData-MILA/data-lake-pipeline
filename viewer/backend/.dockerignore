@@ -1,6 +1,14 @@
-.venv
-__pycache__
-*.pyc
-.pytest_cache
+# Build context is the repo root (viewer/docker-compose.yml).
+.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
 .env
+.prod.env
+viewer/frontend
+**/node_modules
+**/dist
+uv.lock
 tests
+viewer/backend/tests

@@ -248,7 +248,13 @@ export function ColumnConfigurator() {
   };
 
   const handleSave = () => {
-    setBaseColumns(tempBaseColumns);
+    // Selecting every base column is saved as [] — the store's "all columns"
+    // default — which keeps the URL state short and stays correct when new
+    // columns appear later.
+    const allSelected =
+      tempBaseColumns.length === baseColumnsList.length &&
+      baseColumnsList.length > 0;
+    setBaseColumns(allSelected ? [] : tempBaseColumns);
 
     const newAnnotatorColumns: Record<string, string[]> = {};
     for (const [name, section] of Object.entries(annotatorSections)) {

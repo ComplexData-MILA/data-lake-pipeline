@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ViewerState, FilterSpec } from "@/types";
+import type { ViewerState, FilterSpec, TabId } from "@/types";
 import { defaultState } from "@/types";
 
 function encodeState(state: ViewerState): string {
@@ -20,6 +20,8 @@ function getInitialState(): ViewerState {
   if (encoded) {
     const decoded = decodeState(encoded);
     if (decoded) {
+      // Old URLs carrying page/cursor fields still decode — unknown keys are
+      // ignored and page/cursor are no longer part of the state.
       return { ...defaultState, ...decoded };
     }
   }
@@ -35,7 +37,7 @@ function updateUrl(state: ViewerState) {
 
 interface ViewerStore extends ViewerState {
   setDataset: (dataset: string) => void;
-  setPage: (page: number) => void;
+  setTab: (tab: TabId) => void;
   setPageSize: (pageSize: number) => void;
   setAnnotators: (annotators: string[]) => void;
   setAnnotatorColumns: (annotatorColumns: Record<string, string[]>) => void;
@@ -44,6 +46,8 @@ interface ViewerStore extends ViewerState {
   setAnnotatorFilter: (annotator: string, filter: FilterSpec | undefined) => void;
   setSort: (sort: string | undefined, sortDir?: "asc" | "desc") => void;
   setSelectedId: (id: string | null) => void;
+  setTheme: (theme: "light" | "dark" | "system") => void;
+  setStream: (stream: boolean) => void;
   resetFilters: () => void;
   reset: () => void;
 }
@@ -52,28 +56,38 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   ...getInitialState(),
 
   setDataset: (dataset) => {
-    set({ dataset, page: 1, selectedId: null, baseColumns: [], annotatorColumns: {} });
-    updateUrl({ ...get(), dataset, page: 1, selectedId: null, baseColumns: [], annotatorColumns: {} });
+    set({ dataset, selectedId: null, baseColumns: [], annotatorColumns: {} });
+    updateUrl({ ...get(), dataset, selectedId: null, baseColumns: [], annotatorColumns: {} });
   },
 
-  setPage: (page) => {
-    set({ page });
-    updateUrl({ ...get(), page });
+  setTab: (tab) => {
+    set({ tab });
+    updateUrl({ ...get(), tab });
   },
 
   setPageSize: (pageSize) => {
-    set({ pageSize, page: 1 });
-    updateUrl({ ...get(), pageSize, page: 1 });
+    set({ pageSize });
+    updateUrl({ ...get(), pageSize });
+  },
+
+  setTheme: (theme) => {
+    set({ theme });
+    updateUrl({ ...get(), theme });
+  },
+
+  setStream: (stream) => {
+    set({ stream });
+    updateUrl({ ...get(), stream });
   },
 
   setAnnotators: (annotators) => {
-    set({ annotators, page: 1 });
-    updateUrl({ ...get(), annotators, page: 1 });
+    set({ annotators });
+    updateUrl({ ...get(), annotators });
   },
 
   setAnnotatorColumns: (annotatorColumns) => {
-    set({ annotatorColumns, page: 1 });
-    updateUrl({ ...get(), annotatorColumns, page: 1 });
+    set({ annotatorColumns });
+    updateUrl({ ...get(), annotatorColumns });
   },
 
   setBaseColumns: (baseColumns) => {
@@ -84,10 +98,9 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   setBaseFilter: (filter) => {
     set((state) => ({
       filters: { ...state.filters, base: filter },
-      page: 1,
     }));
     const currentState = get();
-    updateUrl({ ...currentState, filters: { ...currentState.filters, base: filter }, page: 1 });
+    updateUrl({ ...currentState, filters: { ...currentState.filters, base: filter } });
   },
 
   setAnnotatorFilter: (annotator, filter) => {
@@ -99,7 +112,6 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
           [annotator]: filter,
         },
       },
-      page: 1,
     }));
     const currentState = get();
     updateUrl({
@@ -111,7 +123,6 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
           [annotator]: filter,
         },
       },
-      page: 1,
     });
   },
 
@@ -126,8 +137,8 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   },
 
   resetFilters: () => {
-    set({ filters: { base: undefined, annotators: {} }, page: 1 });
-    updateUrl({ ...get(), filters: { base: undefined, annotators: {} }, page: 1 });
+    set({ filters: { base: undefined, annotators: {} } });
+    updateUrl({ ...get(), filters: { base: undefined, annotators: {} } });
   },
 
   reset: () => {

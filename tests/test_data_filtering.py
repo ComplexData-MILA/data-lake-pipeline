@@ -55,10 +55,14 @@ async def s3_setup():
         keys_to_delete = []
         async for page in paginator.paginate(Bucket=bucket):
             for obj in page.get("Contents", []):
-                keys_to_delete.append({"Key": obj["Key"]})
-        if keys_to_delete:
+                keys_to_delete.append(obj["Key"])
+        # Chunked deletes: a single DeleteObjects call fails (MalformedXML)
+        # once the bucket holds more objects than the backend accepts.
+        for i in range(0, len(keys_to_delete), 1000):
+            chunk = keys_to_delete[i : i + 1000]
             await client.delete_objects(
-                Bucket=bucket, Delete={"Objects": keys_to_delete}
+                Bucket=bucket,
+                Delete={"Objects": [{"Key": k} for k in chunk]},
             )
 
     return session, kwargs, bucket, prefix
@@ -857,3 +861,26 @@ class TestDeserializeJsonFields:
         assert result["id"] == 1
         assert result["count"] == 42
         assert result["active"] is True
+
+
+async def test_annotate_single_row_injects_created_at():
+    """Annotation rows carry a parseable _created_at timestamp."""
+    import json
+    from datetime import datetime, timezone
+
+    from s3_data_tool.data_filtering import _annotate_single_row
+
+    item = DataItem(data={"text": "hello"}, id="row1", batch="b1")
+
+    async def fake_annotation_fn(_item):
+        return Annotation(data={"label": "pos"}, metadata={"conf": 0.9})
+
+    record = await _annotate_single_row(item, fake_annotation_fn)
+
+    assert record["id"] == "row1"
+    assert record["label"] == '"pos"'  # JSON-stringified by transform_row_for_jsonl
+    raw = record["_created_at"]
+    created = datetime.fromisoformat(json.loads(raw))
+    assert created.tzinfo is not None
+    assert (datetime.now(timezone.utc) - created).total_seconds() < 300
+    assert record["annotated_at"]

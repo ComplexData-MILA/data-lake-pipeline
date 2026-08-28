@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from tqdm.auto import tqdm
 
+from .events import ViewerEvent, publish_event
 from .models import RunManifest, StreamingConfigs
 from .s3_utils import (
     generate_hex_id,
@@ -52,18 +53,48 @@ class DatasetGenerator:
         async for row in tqdm(iterator, ncols=80):
             row["_batch"] = batch
             row["id"] = row.get("id", uuid.uuid4().hex)
+            row["_created_at"] = datetime.now(timezone.utc).isoformat()
             transformed_row = transform_row_for_jsonl(row)
             buffer.append(transformed_row)
             if len(buffer) >= streaming_configs.chunk_size:
                 key = f"{base_path}/{run_id}_chunk_{chunk_idx:05d}.jsonl"
                 await upload_jsonl_chunk(self._s3_client, self._bucket, key, buffer)
+                await publish_event(ViewerEvent(
+                    type="rows_ingested",
+                    dataset=name,
+                    batch=batch,
+                    run_id=run_id,
+                    row_count=len(buffer),
+                    prefix=self._prefix,
+                    bucket=self._bucket,
+                    source="generator",
+                ))
                 buffer.clear()
                 chunk_idx += 1
 
         if buffer:
             key = f"{base_path}/{run_id}_chunk_{chunk_idx:05d}.jsonl"
             await upload_jsonl_chunk(self._s3_client, self._bucket, key, buffer)
+            await publish_event(ViewerEvent(
+                type="rows_ingested",
+                dataset=name,
+                batch=batch,
+                run_id=run_id,
+                row_count=len(buffer),
+                prefix=self._prefix,
+                bucket=self._bucket,
+                source="generator",
+            ))
 
         manifest.completed = True
         manifest.completed_at = datetime.now(timezone.utc)
         await upload_run_manifest(self._s3_client, self._bucket, manifest_key, manifest)
+        await publish_event(ViewerEvent(
+            type="run_completed",
+            dataset=name,
+            batch=batch,
+            run_id=run_id,
+            prefix=self._prefix,
+            bucket=self._bucket,
+            source="generator",
+        ))

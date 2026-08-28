@@ -7,11 +7,12 @@ import pytest
 
 from viewer.backend import duckdb_query
 from viewer.backend.main import (
+    _get_schema_columns,
     get_s3_client,
-    get_schema_with_types,
     list_annotators_from_s3,
     list_datasets_from_s3,
 )
+from viewer.backend.s3_files import build_file_manifest
 from s3_data_tool.s3_utils import enumerate_parquet_paths_sync
 
 pytestmark = pytest.mark.integration
@@ -50,21 +51,24 @@ class TestDuckDBQuery:
         """Test FilterSpec compile method."""
         spec = duckdb_query.FilterSpec()
 
-        result = spec.compile("t", {"field": "text", "op": "eq", "value": "hello"})
-        assert "t.text = 'hello'" in result
+        clause, params = spec.compile("t", {"field": "text", "op": "eq", "value": "hello"})
+        assert clause == '"t"."text" = ?'
+        assert params == ["hello"]
 
-        result = spec.compile("t", {"field": "value", "op": "gt", "value": 10})
-        assert "t.value > 10" in result
+        clause, params = spec.compile("t", {"field": "value", "op": "gt", "value": 10})
+        assert clause == '"t"."value" > ?'
+        assert params == [10]
 
-        result = spec.compile("t", {"field": "text", "op": "contains", "value": "wor"})
-        assert "LIKE" in result
+        clause, params = spec.compile("t", {"field": "text", "op": "contains", "value": "wor"})
+        assert "LIKE ?" in clause
+        assert params == ["%wor%"]
 
     @pytest.mark.asyncio
     async def test_build_query_basic(self):
         """Test build_query creates correct query structure."""
         filters = duckdb_query.FilterSpec()
 
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=[],
             filters=filters,
@@ -83,7 +87,7 @@ class TestDuckDBQuery:
         """Test build_query with annotator joins."""
         filters = duckdb_query.FilterSpec()
 
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=["annotator1"],
             filters=filters,
@@ -104,7 +108,7 @@ class TestDuckDBQuery:
         """Test build_count_query creates correct query."""
         filters = duckdb_query.FilterSpec()
 
-        query = duckdb_query.build_count_query(
+        query, params = duckdb_query.build_count_query(
             filters=filters,
             base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
             annot_parquet_paths={},
@@ -120,7 +124,7 @@ class TestDuckDBQuery:
         filter_data = {"base": {"field": "value", "op": "gt", "value": 10}}
         filters = duckdb_query.FilterSpec(filter_data)
 
-        query = duckdb_query.build_count_query(
+        query, params = duckdb_query.build_count_query(
             filters=filters,
             base_parquet_paths=["s3://bucket/prefix/test_ds/batch1/merged.parquet"],
             annot_parquet_paths={},
@@ -129,6 +133,7 @@ class TestDuckDBQuery:
         )
 
         assert "WHERE" in query
+        assert params == [10]
 
 
 class TestS3Client:
@@ -163,24 +168,34 @@ class TestListAnnotators:
 
 
 class TestGetSchema:
-    """Tests for get_schema_with_types."""
+    """Tests for _get_schema_columns."""
 
     @pytest.mark.asyncio
     async def test_get_schema_columns(self, test_dataset):
-        """Test get_schema_with_types returns schema columns."""
+        """Test _get_schema_columns returns base + annotator columns."""
         dataset_name = test_dataset["dataset_name"]
-        columns = get_schema_with_types(dataset_name, ["annotator1"])
-        # Note: wildcard path /*/merged.parquet doesn't work with PRAGMA table_info in DuckDB
-        # This is a known limitation - it returns empty list but doesn't error
+        client = get_s3_client()
+        manifest = build_file_manifest(
+            client, test_dataset["bucket"], test_dataset["prefix"], dataset_name
+        )
+        columns = _get_schema_columns(dataset_name, ["annotator1"], manifest)
         assert isinstance(columns, list)
+        names = {c.name for c in columns}
+        assert "id" in names
+        assert "text" in names
 
     @pytest.mark.asyncio
     async def test_get_schema_with_annotator_prefix(self, test_dataset):
         """Test schema includes annotator columns with prefix."""
         dataset_name = test_dataset["dataset_name"]
-        columns = get_schema_with_types(dataset_name, ["annotator1"])
-        # Wildcard path limitation - returns empty
-        assert isinstance(columns, list)
+        client = get_s3_client()
+        manifest = build_file_manifest(
+            client, test_dataset["bucket"], test_dataset["prefix"], dataset_name
+        )
+        columns = _get_schema_columns(dataset_name, ["annotator1"], manifest)
+        names = {c.name for c in columns}
+        assert "annotator1.label" in names
+        assert "annotator1.is_valid" in names
 
 
 class TestAPIEndpoints:

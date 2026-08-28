@@ -30,7 +30,7 @@ from .models import Annotation, AnnotationManifest, DataItem, StreamingConfigs
 from .s3_lock import S3Lock, gather_subject_to_lock_renewal, gather_subject_to_multi_lock_renewal
 from .s3_utils import (
     annotation_manifest_key,
-    enumerate_parquet_paths,
+    enumerate_merged_paths,
     s3_object_exists,
     transform_row_for_jsonl,
     upload_annotation_manifest,
@@ -177,6 +177,7 @@ async def _annotate_single_row(
         "batch": item.batch,
         "metadata": result.metadata,
         "annotated_at": datetime.now(timezone.utc).isoformat(),
+        "_created_at": datetime.now(timezone.utc).isoformat(),
     }
     return transform_row_for_jsonl(record)
 
@@ -213,6 +214,25 @@ class FilterForExport:
         path_list = ", ".join(f"'{p}'" for p in paths)
         return f"[{path_list}]"
 
+    def _format_merged_source(self, paths: list[str]) -> str:
+        """FROM expression reading a mix of merged parquet and JSONL block URIs."""
+        parquet_paths = [p for p in paths if not p.endswith(".jsonl.gz")]
+        jsonl_paths = [p for p in paths if p.endswith(".jsonl.gz")]
+        parts: list[str] = []
+        if parquet_paths:
+            parts.append(
+                f"(SELECT * FROM read_parquet({self._format_parquet_paths(parquet_paths)}))"
+            )
+        if jsonl_paths:
+            parts.append(
+                f"(SELECT * FROM read_json_auto({self._format_parquet_paths(jsonl_paths)}, "
+                "union_by_name=true, format='newline_delimited', "
+                "ignore_errors=true, maximum_sample_files=-1))"
+            )
+        assert parts, "paths must not be empty"
+        # Outer parens so the set operation is a valid standalone FROM source.
+        return f"({' UNION ALL BY NAME '.join(parts)})"
+
     def _build_filtered_cte(
         self,
         name: str,
@@ -230,20 +250,21 @@ class FilterForExport:
         where_clause = (
             f" WHERE {filter_node.compile(set(columns))}" if filter_node else ""
         )
-        paths_sql = self._format_parquet_paths(paths)
-        return f"{name} AS (SELECT {cols_str} FROM read_parquet({paths_sql}){where_clause} GROUP BY id)"
+        paths_sql = self._format_merged_source(paths)
+        return f"{name} AS (SELECT {cols_str} FROM {paths_sql}{where_clause} GROUP BY id)"
 
     async def get_duckdb_query(self, batches: list[str] | None = None) -> str:
         """Generate DuckDB query with WITH clause for filtered CTEs."""
         ctes: list[str] = []
 
-        base_paths = await enumerate_parquet_paths(
+        base_paths = await enumerate_merged_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
         if batches:
             base_paths = [p for p in base_paths if any(f"/{b}/" in p for b in batches)]
         if not base_paths:
-            raise DatasetNotMergedError(f"No base paths found for dataset {self._dataset_name}")
+            # A dataset with no merged data yet iterates as empty.
+            return ""
         base_cte = self._build_filtered_cte(
             "base_filtered", base_paths, self._base_columns, self._base_filter
         )
@@ -252,35 +273,47 @@ class FilterForExport:
         ctes.append(base_cte)
 
         annot_results = await asyncio.gather(*[
-            enumerate_parquet_paths(
+            enumerate_merged_paths(
                 self._s3_client, self._bucket, self._prefix, self._dataset_name, _annotator
             )
             for _annotator in self._annotator_columns
         ])
 
-        active_annotators: list[str] = []
+        # Restrictive annotator filters INNER JOIN (drop base rows the annotator
+        # filtered out); no filter or an always-true filter LEFT JOINs so rows the
+        # annotator has not annotated yet are kept (with NULL annotation columns).
+        active_annotators: list[tuple[str, str, list[str]]] = []
         for (_annotator, _cols), annot_paths in zip(self._annotator_columns.items(), annot_results):
             if batches:
                 annot_paths = [p for p in annot_paths if any(f"/{b}/" in p for b in batches)]
             if not annot_paths:
                 continue
+            filter_node = self._annotator_filters.get(_annotator)
+            compiled_filter = filter_node.compile(set(_cols)) if filter_node else ""
+            join_type = "JOIN" if compiled_filter not in ("", "TRUE") else "LEFT JOIN"
             cte = self._build_filtered_cte(
-                f"{_annotator}_filtered", annot_paths, _cols,
-                self._annotator_filters.get(_annotator),
+                f"{_annotator}_filtered", annot_paths, _cols, filter_node
             )
             if cte is not None:
                 ctes.append(cte)
-                active_annotators.append(_annotator)
+                active_annotators.append(
+                    (_annotator, join_type, [c for c in _cols if c != "id"])
+                )
 
-        select_parts = ["base_filtered.*"] + [
-            f"{a}_filtered.*" for a in active_annotators
-        ]
+        # Project base columns + each annotator's non-id columns explicitly:
+        # DuckDB does not coalesce the USING join key in SELECT *, and duplicate
+        # "id" columns would clobber base_filtered.id in the row mapping below.
+        select_parts = ["base_filtered.*"]
+        for _annotator, _, _non_id_cols in active_annotators:
+            select_parts.extend(
+                f"{_annotator}_filtered.{c}" for c in _non_id_cols
+            )
 
         if not active_annotators:
             return f"WITH {', '.join(ctes)} SELECT {', '.join(select_parts)} FROM base_filtered"
 
         join_clause = " ".join(
-            f"JOIN {a}_filtered USING (id)" for a in active_annotators
+            f"{join_type} {a}_filtered USING (id)" for a, join_type, _ in active_annotators
         )
 
         return (
@@ -297,6 +330,8 @@ class FilterForExport:
             batches: If provided, query only these specific batches.
         """
         query = await self.get_duckdb_query(batches=batches)
+        if not query:
+            return
         logger.debug(f"Executing DuckDB query: {query}")
         try:
             async for item in self._execute_and_stream(query):
@@ -410,7 +445,7 @@ class FilterForAnnotation(FilterForExport):
         Args:
             batches: If provided, query only these specific batches.
         """
-        base_paths = await enumerate_parquet_paths(
+        base_paths = await enumerate_merged_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
         if batches:
@@ -419,7 +454,7 @@ class FilterForAnnotation(FilterForExport):
             logger.warning("No base paths found, yielding nothing")
             return
 
-        annotator_paths = await enumerate_parquet_paths(
+        annotator_paths = await enumerate_merged_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name,
             self._annotator_name,
         )
@@ -438,14 +473,17 @@ class FilterForAnnotation(FilterForExport):
         ctes.append(base_cte)
 
         annot_results = await asyncio.gather(*[
-            enumerate_parquet_paths(
+            enumerate_merged_paths(
                 self._s3_client, self._bucket, self._prefix, self._dataset_name,
                 _annotator,
             )
             for _annotator in self._annotator_columns
         ])
 
-        active_annotators: list[str] = []
+        # Same join semantics as get_duckdb_query: restrictive annotator filters
+        # INNER JOIN; no/always-true filters LEFT JOIN (rows not yet annotated by
+        # that annotator stay eligible).
+        active_annotators: list[tuple[str, str, list[str]]] = []
         for (_annotator, _cols), a_paths in zip(
             self._annotator_columns.items(), annot_results
         ):
@@ -453,30 +491,37 @@ class FilterForAnnotation(FilterForExport):
                 a_paths = [p for p in a_paths if any(f"/{b}/" in p for b in batches)]
             if not a_paths:
                 continue
+            filter_node = self._annotator_filters.get(_annotator)
+            compiled_filter = filter_node.compile(set(_cols)) if filter_node else ""
+            join_type = "JOIN" if compiled_filter not in ("", "TRUE") else "LEFT JOIN"
             cte = self._build_filtered_cte(
-                f"{_annotator}_filtered", a_paths, _cols,
-                self._annotator_filters.get(_annotator),
+                f"{_annotator}_filtered", a_paths, _cols, filter_node
             )
             if cte is not None:
                 ctes.append(cte)
-                active_annotators.append(_annotator)
+                active_annotators.append(
+                    (_annotator, join_type, [c for c in _cols if c != "id"])
+                )
 
         anti_join = ""
         if annotator_paths:
-            annot_paths_sql = self._format_parquet_paths(annotator_paths)
-            ctes.append(
-                f"annotator_done AS (SELECT id FROM read_parquet({annot_paths_sql}))"
-            )
+            annot_paths_sql = self._format_merged_source(annotator_paths)
+            ctes.append(f"annotator_done AS (SELECT id FROM {annot_paths_sql})")
             anti_join = (
                 " LEFT JOIN annotator_done USING (id) "
                 "WHERE annotator_done.id IS NULL"
             )
 
-        select_parts = ["base_filtered.*"] + [
-            f"{a}_filtered.*" for a in active_annotators
-        ]
+        # Project base columns + each annotator's non-id columns explicitly:
+        # DuckDB does not coalesce the USING join key in SELECT *, and duplicate
+        # "id" columns would clobber base_filtered.id in the row mapping below.
+        select_parts = ["base_filtered.*"]
+        for _annotator, _, _non_id_cols in active_annotators:
+            select_parts.extend(
+                f"{_annotator}_filtered.{c}" for c in _non_id_cols
+            )
         join_parts = " ".join(
-            f"JOIN {a}_filtered USING (id)" for a in active_annotators
+            f"{join_type} {a}_filtered USING (id)" for a, join_type, _ in active_annotators
         )
 
         query = (
@@ -502,7 +547,7 @@ class FilterForAnnotation(FilterForExport):
         Skips batches that have an annotation manifest (already fully annotated).
         Returns list of (batch_name, lock) for successfully claimed batches.
         """
-        base_paths = await enumerate_parquet_paths(
+        base_paths = await enumerate_merged_paths(
             self._s3_client, self._bucket, self._prefix, self._dataset_name
         )
         batch_names = list(dict.fromkeys(p.split("/")[-2] for p in base_paths))
