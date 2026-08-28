@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ViewerState, FilterSpec, TabId } from "@/types";
+import type { ViewerState, ChartState, FilterSpec, TabId } from "@/types";
 import { defaultState } from "@/types";
 
 function encodeState(state: ViewerState): string {
@@ -14,15 +14,41 @@ function decodeState(encoded: string): ViewerState | null {
   }
 }
 
+// Chart values reach the backend SQL through whitelisted literals, so a
+// hand-edited shared URL must be clamped back to valid choices on load.
+const CHART_BUCKETS = new Set(["1m", "5m", "1h", "1d"]);
+const CHART_MINUTES = new Set([60, 1440, 10080, 43200, -1]);
+const CHART_LIMITS = new Set([3, 4, 5, 6, 7, 8]);
+
+function sanitizeChart(chart: unknown): ChartState {
+  const c = (chart ?? {}) as Partial<ChartState>;
+  return {
+    column: typeof c.column === "string" ? c.column : "",
+    mode: c.mode === "trend" ? "trend" : "counts",
+    bucket:
+      typeof c.bucket === "string" && CHART_BUCKETS.has(c.bucket)
+        ? c.bucket
+        : defaultState.chart.bucket,
+    minutes:
+      typeof c.minutes === "number" && CHART_MINUTES.has(c.minutes)
+        ? c.minutes
+        : defaultState.chart.minutes,
+    limit:
+      typeof c.limit === "number" && CHART_LIMITS.has(c.limit)
+        ? c.limit
+        : defaultState.chart.limit,
+  };
+}
+
 function getInitialState(): ViewerState {
   const params = new URLSearchParams(window.location.search);
   const encoded = params.get("s");
   if (encoded) {
     const decoded = decodeState(encoded);
-    if (decoded) {
+    if (decoded && typeof decoded === "object") {
       // Old URLs carrying page/cursor fields still decode — unknown keys are
       // ignored and page/cursor are no longer part of the state.
-      return { ...defaultState, ...decoded };
+      return { ...defaultState, ...decoded, chart: sanitizeChart(decoded.chart) };
     }
   }
   return { ...defaultState };
@@ -38,6 +64,7 @@ function updateUrl(state: ViewerState) {
 interface ViewerStore extends ViewerState {
   setDataset: (dataset: string) => void;
   setTab: (tab: TabId) => void;
+  setChart: (chart: Partial<ChartState>) => void;
   setPageSize: (pageSize: number) => void;
   setAnnotators: (annotators: string[]) => void;
   setAnnotatorColumns: (annotatorColumns: Record<string, string[]>) => void;
@@ -63,6 +90,11 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
   setTab: (tab) => {
     set({ tab });
     updateUrl({ ...get(), tab });
+  },
+
+  setChart: (chart) => {
+    set((state) => ({ chart: { ...state.chart, ...chart } }));
+    updateUrl(get());
   },
 
   setPageSize: (pageSize) => {

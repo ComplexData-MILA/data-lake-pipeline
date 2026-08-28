@@ -86,6 +86,8 @@ export function App() {
             <TabsTrigger value="activity">Activity</TabsTrigger>
             <TabsTrigger value="charts">Charts</TabsTrigger>
           </TabsList>
+          {/* Shared across all three tabs: data/activity/charts. */}
+          <DatasetSelector onOpenChange={setDatasetDialogOpen} />
           {dataset && <LiveStatusBadge />}
           <Button
             variant="ghost"
@@ -109,7 +111,6 @@ export function App() {
             <Card className="w-full mb-6">
               <CardContent className="pt-6">
                 <div className="flex flex-wrap items-center gap-4">
-                  <DatasetSelector onOpenChange={setDatasetDialogOpen} />
                   <ColumnConfigurator />
                   <FilterPanel />
                   <Button
@@ -138,7 +139,7 @@ export function App() {
 
         <TabsContent value="charts" className="mt-4">
           <Suspense fallback={<TabFallback />}>
-            <ChartsTab onOpenDatasetDialog={() => setDatasetDialogOpen(true)} />
+            <ChartsTab />
           </Suspense>
         </TabsContent>
       </Tabs>

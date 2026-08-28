@@ -32,18 +32,18 @@ const WINDOW_OPTIONS = [
 
 const LIMIT_OPTIONS = [3, 4, 5, 6, 7, 8] as const;
 
-export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () => void }) {
+export function ChartsTab() {
   const dark = useDarkMode();
   const ink = chartInk(dark);
   const dataset = useViewerStore((s) => s.dataset);
   const refreshNonce = useLiveStore((s) => s.refreshNonce);
+  // Chart controls live in the URL state so a shared link reopens the exact
+  // chart (see useUrlState).
+  const chart = useViewerStore((s) => s.chart);
+  const setChart = useViewerStore((s) => s.setChart);
+  const { column, mode, bucket, limit, minutes } = chart;
 
   const [columns, setColumns] = useState<string[]>([]);
-  const [column, setColumn] = useState<string>("");
-  const [mode, setMode] = useState<"counts" | "trend">("counts");
-  const [bucket, setBucket] = useState<string>("1h");
-  const [limit, setLimit] = useState<number>(8);
-  const [minutes, setMinutes] = useState<number>(-1);
   const [data, setData] = useState<CategoricalResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +60,14 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
           .map((c) => c.name)
           .filter((n) => !SYSTEM_COLUMNS.has(n) && !n.includes("."));
         setColumns(cols);
-        setColumn((current) => (current && cols.includes(current) ? current : cols[0] ?? ""));
+        // Keep the shared URL column when the dataset has it; otherwise fall
+        // back to the first column — persisted, so the URL keeps matching
+        // what is actually charted.
+        const resolved =
+          chart.column && cols.includes(chart.column)
+            ? chart.column
+            : (cols[0] ?? "");
+        if (resolved !== chart.column) setChart({ column: resolved });
       })
       .catch(() => undefined);
     return () => {
@@ -223,11 +230,8 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
     return (
       <div className="py-24 text-center">
         <p className="text-muted-foreground mb-4">
-          Select a dataset to chart its columns.
+          Select a dataset above to chart its columns.
         </p>
-        {onOpenDatasetDialog && (
-          <Button onClick={onOpenDatasetDialog}>Choose dataset</Button>
-        )}
       </div>
     );
   }
@@ -235,7 +239,7 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-4">
-        <Select value={column || undefined} onValueChange={setColumn}>
+        <Select value={column || undefined} onValueChange={(v) => setChart({ column: v })}>
           <SelectTrigger className="w-[220px]">
             <SelectValue placeholder="Pick a column" />
           </SelectTrigger>
@@ -252,20 +256,20 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
           <Button
             variant={mode === "counts" ? "default" : "ghost"}
             size="sm"
-            onClick={() => setMode("counts")}
+            onClick={() => setChart({ mode: "counts" })}
           >
             Counts
           </Button>
           <Button
             variant={mode === "trend" ? "default" : "ghost"}
             size="sm"
-            onClick={() => setMode("trend")}
+            onClick={() => setChart({ mode: "trend" })}
           >
             Trend
           </Button>
         </div>
 
-        <Select value={String(limit)} onValueChange={(v) => setLimit(Number(v))}>
+        <Select value={String(limit)} onValueChange={(v) => setChart({ limit: Number(v) })}>
           <SelectTrigger className="w-[100px]">
             <SelectValue />
           </SelectTrigger>
@@ -280,7 +284,7 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
 
         {mode === "trend" && (
           <>
-            <Select value={bucket} onValueChange={setBucket}>
+            <Select value={bucket} onValueChange={(v) => setChart({ bucket: v })}>
               <SelectTrigger className="w-[160px]">
                 <SelectValue />
               </SelectTrigger>
@@ -292,7 +296,7 @@ export function ChartsTab({ onOpenDatasetDialog }: { onOpenDatasetDialog?: () =>
                 ))}
               </SelectContent>
             </Select>
-            <Select value={String(minutes)} onValueChange={(v) => setMinutes(Number(v))}>
+            <Select value={String(minutes)} onValueChange={(v) => setChart({ minutes: Number(v) })}>
               <SelectTrigger className="w-[160px]">
                 <SelectValue />
               </SelectTrigger>

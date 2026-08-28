@@ -71,9 +71,20 @@ export type ThemeMode = "light" | "dark" | "system";
 
 export type TabId = "data" | "activity" | "charts";
 
+export type ChartMode = "counts" | "trend";
+
+export interface ChartState {
+  column: string; // "" = first available column
+  mode: ChartMode;
+  bucket: string; // "1m" | "5m" | "1h" | "1d"
+  minutes: number; // -1 = all time
+  limit: number; // top-N values
+}
+
 export interface ViewerState {
   dataset: string;
   tab: TabId;
+  chart: ChartState;
   pageSize: number; // fetch batch size for infinite scroll
   annotators: string[];
   annotatorColumns: Record<string, string[]>;
@@ -94,6 +105,14 @@ export type ViewerStateKey = keyof ViewerState;
 export const defaultState: ViewerState = {
   dataset: "",
   tab: "data",
+  // Charts-tab defaults; a shared URL carries the full chart selection in `s`.
+  chart: {
+    column: "",
+    mode: "counts",
+    bucket: "1h",
+    minutes: -1,
+    limit: 8,
+  },
   pageSize: 50,
   annotators: [],
   annotatorColumns: {},
