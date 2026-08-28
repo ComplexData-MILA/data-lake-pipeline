@@ -35,7 +35,7 @@ class TestBuildQuery:
             }
         }
         filters = duckdb_query.FilterSpec(filter_data)
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=["annotator1"],
             filters=filters,
@@ -56,7 +56,7 @@ class TestBuildQuery:
             }
         }
         filters = duckdb_query.FilterSpec(filter_data)
-        query = duckdb_query.build_count_query(
+        query, params = duckdb_query.build_count_query(
             filters=filters,
             base_parquet_paths=TEST_BASE_PATHS,
             annot_parquet_paths=TEST_ANNOT_PATHS,
@@ -69,7 +69,7 @@ class TestBuildQuery:
     async def test_basic_query_no_filters(self):
         """Test basic query without filters."""
         filters = duckdb_query.FilterSpec()
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=[],
             filters=filters,
@@ -87,7 +87,7 @@ class TestBuildQuery:
         """Test query with base filter."""
         filter_data = {"base": {"field": "annotator_name", "op": "eq", "value": "test"}}
         filters = duckdb_query.FilterSpec(filter_data)
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=[],
             filters=filters,
@@ -96,14 +96,15 @@ class TestBuildQuery:
             offset=0,
             limit=50,
         )
-        assert "base.annotator_name" in query
+        assert '"base"."annotator_name"' in query
         assert "WHERE" in query
+        assert params == ["test"], "filter value must be bound, not interpolated"
 
     @pytest.mark.asyncio
     async def test_query_with_annotator_join(self):
         """Test query with annotator join."""
         filters = duckdb_query.FilterSpec()
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text"],
             annotators=["annotator1"],
             filters=filters,
@@ -125,7 +126,7 @@ class TestBuildQuery:
     async def test_query_column_aliasing(self):
         """Test that column aliasing in CTE uses correct syntax."""
         filters = duckdb_query.FilterSpec()
-        query, columns, annotator_columns = duckdb_query.build_query(
+        query, params, columns, annotator_columns = duckdb_query.build_query(
             columns=["id", "text", "score"],
             annotators=[],
             filters=filters,
@@ -135,7 +136,7 @@ class TestBuildQuery:
             limit=50,
         )
         assert "ANY_VALUE" in query
-        assert "GROUP BY id" in query
+        assert "GROUP BY" in query
 
 
 class TestBuildCountQuery:
@@ -145,7 +146,7 @@ class TestBuildCountQuery:
     async def test_count_query_no_filters(self):
         """Test count query without filters."""
         filters = duckdb_query.FilterSpec()
-        query = duckdb_query.build_count_query(
+        query, params = duckdb_query.build_count_query(
             filters=filters,
             base_parquet_paths=TEST_BASE_PATHS,
             annot_parquet_paths={},
@@ -159,7 +160,7 @@ class TestBuildCountQuery:
         """Test count query with filters."""
         filter_data = {"base": {"field": "value", "op": "gt", "value": 10}}
         filters = duckdb_query.FilterSpec(filter_data)
-        query = duckdb_query.build_count_query(
+        query, params = duckdb_query.build_count_query(
             filters=filters,
             base_parquet_paths=TEST_BASE_PATHS,
             annot_parquet_paths={},
@@ -167,46 +168,73 @@ class TestBuildCountQuery:
             annotator_columns={},
         )
         assert "WHERE" in query
+        assert params == [10]
 
 
 class TestFilterSpecCompile:
     """Tests for FilterSpec.compile method."""
 
     def test_compile_eq_string(self):
-        """Test eq compile with string value."""
+        """Test eq compile with string value (bound parameter)."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", {"field": "name", "op": "eq", "value": "test"})
-        assert result == "base.name = 'test'"
+        clause, params = fs.compile("base", {"field": "name", "op": "eq", "value": "test"})
+        assert clause == '"base"."name" = ?'
+        assert params == ["test"]
 
     def test_compile_eq_bool(self):
-        """Test eq compile with bool value."""
+        """Test eq compile with bool value (bound parameter)."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", {"field": "flag", "op": "eq", "value": True})
-        assert result == "base.flag = true"
+        clause, params = fs.compile("base", {"field": "flag", "op": "eq", "value": True})
+        assert clause == '"base"."flag" = ?'
+        assert params == [True]
 
     def test_compile_gt(self):
-        """Test gt compile."""
+        """Test gt compile (bound parameter)."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", {"field": "score", "op": "gt", "value": 10})
-        assert result == "base.score > 10"
+        clause, params = fs.compile("base", {"field": "score", "op": "gt", "value": 10})
+        assert clause == '"base"."score" > ?'
+        assert params == [10]
 
     def test_compile_contains(self):
         """Test contains compile."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", {"field": "text", "op": "contains", "value": "foo"})
-        assert "LIKE" in result
+        clause, params = fs.compile("base", {"field": "text", "op": "contains", "value": "foo"})
+        assert "LIKE ?" in clause
+        assert params == ["%foo%"]
+
+    def test_compile_escapes_like_wildcards(self):
+        """Test contains escapes LIKE wildcards in the bound value."""
+        fs = duckdb_query.FilterSpec()
+        clause, params = fs.compile("base", {"field": "text", "op": "contains", "value": "a%b_c"})
+        assert params == ["%a\\%b\\_c%"]
 
     def test_compile_empty(self):
         """Test compile with no filter spec."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", None)
-        assert result == ""
+        clause, params = fs.compile("base", None)
+        assert clause == ""
+        assert params == []
 
-    def test_compile_leading_dot_in_field(self):
-        """Test compile handles leading dot in field (edge case)."""
+    def test_compile_rejects_invalid_field(self):
+        """Test compile rejects non-identifier fields (SQL injection guard)."""
         fs = duckdb_query.FilterSpec()
-        result = fs.compile("base", {".field": "value", "op": "eq", "value": "test"})
-        assert ".." not in result
+        with pytest.raises(ValueError):
+            fs.compile("base", {"field": "x; DROP TABLE", "op": "eq", "value": "test"})
+        with pytest.raises(ValueError):
+            fs.compile("base", {"field": ".field", "op": "eq", "value": "test"})
+
+    def test_compile_does_not_interpolate_values(self):
+        """Test string values never appear interpolated in the clause."""
+        fs = duckdb_query.FilterSpec()
+        clause, params = fs.compile("base", {"field": "name", "op": "eq", "value": "' OR 1=1 --"})
+        assert "OR 1=1" not in clause
+        assert params == ["' OR 1=1 --"]
+
+    def test_compile_unsupported_op(self):
+        """Test unsupported ops raise ValueError."""
+        fs = duckdb_query.FilterSpec()
+        with pytest.raises(ValueError):
+            fs.compile("base", {"field": "name", "op": "drop", "value": "x"})
 
 
 class TestFormatParquetPaths:

@@ -28,9 +28,13 @@ test = [
     "pytest-timeout>=2.3",
     "pandas>=2.0",
 ]
+redis = [
+    "redis>=5.0",
+]
 
 [project.scripts]
 s3-data-tool-clean-up = "s3_data_tool.clean_up:main"
+s3-data-tool-convert = "s3_data_tool.convert:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["s3_data_tool"]

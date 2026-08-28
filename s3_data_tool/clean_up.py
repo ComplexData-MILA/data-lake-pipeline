@@ -9,8 +9,17 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from aioboto3 import Session
 
 from .async_utils import chain_async_iterators
+from .events import ViewerEvent, publish_event
+from .index import update_batch_index
 from .models import RunManifest
 from .s3_lock import S3Lock
+from .jsonl_merge import (
+    JSONL_MERGE_ENABLED,
+    JSONL_MERGE_MAX_DATASET_BYTES,
+    dataset_merged_size,
+    merge_to_jsonl_blocks,
+    publish_blocks,
+)
 from .s3_utils import (
     MergeCandidate,
     annotation_manifest_key,
@@ -74,6 +83,8 @@ async def discover_merge_candidate(
                     logger.warning(f"Failed to read manifest {key}: {e}")
             elif filename == "merged.parquet":
                 candidate.existing_parquet_key = key
+            elif filename.startswith("merged_") and filename.endswith(".jsonl.gz"):
+                candidate.existing_block_keys.append(key)
 
     if all_dedup_sets:
         candidate.deduplicate_on = sorted(set.intersection(*all_dedup_sets))
@@ -116,13 +127,117 @@ async def merge_dataset_batch(
 ) -> bool:
     candidate = await discover_merge_candidate(s3_client, bucket, batch_prefix)
 
+    has_merged = bool(candidate.existing_parquet_key or candidate.existing_block_keys)
     if not candidate.jsonl_keys:
-        if candidate.existing_parquet_key:
+        if has_merged:
             logger.debug(f"Skipping {batch_prefix}: already merged (no JSONL files)")
             return True
         logger.debug(f"No files to merge for {batch_prefix}")
         return True
 
+    ann_prefix, dataset, batch = batch_prefix.rsplit("/", 2)
+
+    # Small datasets merge to id-sorted JSONL blocks (the viewer's format);
+    # datasets at/over the size threshold keep the legacy parquet merge.
+    if (
+        JSONL_MERGE_ENABLED
+        and await dataset_merged_size(s3_client, bucket, ann_prefix, dataset)
+        < JSONL_MERGE_MAX_DATASET_BYTES
+    ):
+        row_count = await _merge_dataset_batch_jsonl(
+            s3_client, bucket, ann_prefix, dataset, batch, batch_prefix, candidate
+        )
+    else:
+        row_count = await _merge_dataset_batch_parquet(
+            s3_client, bucket, batch_prefix, candidate
+        )
+
+    # New base data invalidates annotation manifests — delete them so
+    # annotators re-evaluate this batch next session.
+    annotators = await enumerate_annotators(s3_client, bucket, ann_prefix, dataset)
+    manifest_keys = []
+    for annotator in annotators:
+        key = annotation_manifest_key(ann_prefix, dataset, annotator, batch)
+        if await s3_object_exists(s3_client, bucket, key):
+            manifest_keys.append(key)
+    if manifest_keys:
+        await delete_objects(s3_client, bucket, manifest_keys)
+        logger.info(
+            f"Deleted {len(manifest_keys)} annotation manifests for "
+            f"{dataset}/{batch}"
+        )
+
+    logger.info(
+        f"Merged {batch_prefix}: {len(candidate.jsonl_keys)} JSONL files, "
+        f"-> {row_count} deduplicated rows"
+    )
+
+    await publish_event(ViewerEvent(
+        type="batch_merged",
+        dataset=dataset,
+        batch=batch,
+        row_count=row_count,
+        prefix=ann_prefix,
+        bucket=bucket,
+        source="clean_up",
+    ))
+    return True
+
+
+async def _merge_dataset_batch_jsonl(
+    s3_client: "S3Client",
+    bucket: str,
+    ann_prefix: str,
+    dataset: str,
+    batch: str,
+    batch_prefix: str,
+    candidate: MergeCandidate,
+) -> int:
+    """Merge a batch into blocked, id-sorted JSONL (the viewer's merged format)."""
+    result = await asyncio.to_thread(
+        merge_to_jsonl_blocks,
+        bucket,
+        ann_prefix,
+        dataset,
+        batch,
+        candidate.jsonl_keys,
+        candidate.existing_parquet_key,
+        candidate.existing_block_keys,
+        candidate.deduplicate_on,
+    )
+
+    # Publish blocks atomically (copy temp -> final), then drop temps.
+    temp_keys = await publish_blocks(s3_client, bucket, result["blocks"])
+
+    # Update the dataset index partition before deleting the chunks (index
+    # failures are non-fatal — the viewer falls back to scan-based queries).
+    try:
+        await update_batch_index(
+            s3_client,
+            bucket,
+            ann_prefix,
+            dataset,
+            batch,
+            merged_jsonl_glob=f"{batch_prefix}/merged_*.jsonl.gz",
+            blocks=result["blocks"],
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update index for {batch_prefix}: {e}")
+
+    keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + temp_keys
+    if candidate.existing_parquet_key:
+        keys_to_delete.append(candidate.existing_parquet_key)
+    await delete_objects(s3_client, bucket, keys_to_delete)
+    return result["row_count"]
+
+
+async def _merge_dataset_batch_parquet(
+    s3_client: "S3Client",
+    bucket: str,
+    batch_prefix: str,
+    candidate: MergeCandidate,
+) -> int:
+    """Legacy merge: chunks + existing parquet -> merged.parquet (big datasets)."""
     schema = await discover_schema(s3_client, bucket, candidate)
 
     row_iter = chain_async_iterators(
@@ -146,33 +261,22 @@ async def merge_dataset_batch(
     await s3_client.copy_object(
         Bucket=bucket, Key=output_key, CopySource={"Bucket": bucket, "Key": temp_key}
     )
+    # Update the dataset index partition before deleting the chunks (index
+    # failures are non-fatal — the viewer falls back to scan-based queries).
+    prefix_parts = batch_prefix.rsplit("/", 2)
+    try:
+        await update_batch_index(
+            s3_client,
+            bucket,
+            prefix_parts[0],
+            prefix_parts[1],
+            prefix_parts[2],
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update index for {batch_prefix}: {e}")
     keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + [temp_key]
     await delete_objects(s3_client, bucket, keys_to_delete)
-
-    # New base data invalidates annotation manifests — delete them so
-    # annotators re-evaluate this batch next session.
-    prefix_parts = batch_prefix.rsplit("/", 2)
-    ann_prefix = prefix_parts[0]
-    dataset = prefix_parts[1]
-    batch = prefix_parts[2]
-    annotators = await enumerate_annotators(s3_client, bucket, ann_prefix, dataset)
-    manifest_keys = []
-    for annotator in annotators:
-        key = annotation_manifest_key(ann_prefix, dataset, annotator, batch)
-        if await s3_object_exists(s3_client, bucket, key):
-            manifest_keys.append(key)
-    if manifest_keys:
-        await delete_objects(s3_client, bucket, manifest_keys)
-        logger.info(
-            f"Deleted {len(manifest_keys)} annotation manifests for "
-            f"{dataset}/{batch}"
-        )
-
-    logger.info(
-        f"Merged {batch_prefix}: {len(candidate.jsonl_keys)} JSONL files, "
-        f"-> {deduped_count} deduplicated rows"
-    )
-    return True
+    return deduped_count
 
 
 async def merge_annotation_batch(
@@ -182,39 +286,78 @@ async def merge_annotation_batch(
 ) -> bool:
     candidate = await discover_merge_candidate(s3_client, bucket, batch_prefix)
 
+    has_merged = bool(candidate.existing_parquet_key or candidate.existing_block_keys)
     if not candidate.jsonl_keys:
-        if candidate.existing_parquet_key:
+        if has_merged:
             logger.info(f"Skipping {batch_prefix}: already merged (no JSONL files)")
             return True
         logger.info(f"No files to merge for {batch_prefix}")
         return True
 
-    schema = await discover_schema(s3_client, bucket, candidate)
+    ann_prefix, dataset, _, annotator, batch = batch_prefix.rsplit("/", 4)
 
-    row_iter = chain_async_iterators(
-        iter_jsonl_rows(s3_client, bucket, candidate.jsonl_keys),
-        (
-            iter_parquet_rows(s3_client, bucket, candidate.existing_parquet_key)
-            if candidate.existing_parquet_key
-            else None
-        ),
-    )
+    if (
+        JSONL_MERGE_ENABLED
+        and await dataset_merged_size(
+            s3_client, bucket, ann_prefix, dataset, annotator
+        )
+        < JSONL_MERGE_MAX_DATASET_BYTES
+    ):
+        result = await asyncio.to_thread(
+            merge_to_jsonl_blocks,
+            bucket,
+            ann_prefix,
+            dataset,
+            batch,
+            candidate.jsonl_keys,
+            candidate.existing_parquet_key,
+            candidate.existing_block_keys,
+            candidate.deduplicate_on,
+            annotator,
+        )
+        temp_keys = await publish_blocks(s3_client, bucket, result["blocks"])
+        keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys + temp_keys
+        if candidate.existing_parquet_key:
+            keys_to_delete.append(candidate.existing_parquet_key)
+        await delete_objects(s3_client, bucket, keys_to_delete)
+        row_count = result["row_count"]
+    else:
+        schema = await discover_schema(s3_client, bucket, candidate)
 
-    output_key = f"{batch_prefix}/merged.parquet"
-    row_count = await async_write_parquet(
-        s3_client, bucket, output_key, row_iter, schema
-    )
+        row_iter = chain_async_iterators(
+            iter_jsonl_rows(s3_client, bucket, candidate.jsonl_keys),
+            (
+                iter_parquet_rows(s3_client, bucket, candidate.existing_parquet_key)
+                if candidate.existing_parquet_key
+                else None
+            ),
+        )
 
-    keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys
-    if candidate.existing_parquet_key and candidate.existing_parquet_key != output_key:
-        keys_to_delete.append(candidate.existing_parquet_key)
+        output_key = f"{batch_prefix}/merged.parquet"
+        row_count = await async_write_parquet(
+            s3_client, bucket, output_key, row_iter, schema
+        )
 
-    await delete_objects(s3_client, bucket, keys_to_delete)
+        keys_to_delete = candidate.jsonl_keys + candidate.manifest_keys
+        if candidate.existing_parquet_key and candidate.existing_parquet_key != output_key:
+            keys_to_delete.append(candidate.existing_parquet_key)
+
+        await delete_objects(s3_client, bucket, keys_to_delete)
 
     logger.info(
         f"Merged {batch_prefix}: {len(candidate.jsonl_keys)} JSONL files, "
         f"{row_count} total rows"
     )
+
+    await publish_event(ViewerEvent(
+        type="annotation_updated",
+        dataset=dataset,
+        annotator=annotator,
+        batch=batch,
+        row_count=row_count,
+        bucket=bucket,
+        source="clean_up",
+    ))
     return True
 
 

@@ -389,7 +389,8 @@ async def enumerate_batches(
         for cp in page.get("CommonPrefixes", []):
             if (p := cp.get("Prefix")) is not None:
                 batch_name = p.rstrip("/").split("/")[-1]
-                if not batch_name.startswith("annotations"):
+                # Skip annotations and index partitions (_index) — not batches.
+                if not batch_name.startswith("annotations") and not batch_name.startswith("_"):
                     batches.add(batch_name)
     return sorted(batches)
 
@@ -408,6 +409,73 @@ async def enumerate_annotators(
                 annotator_name = p.rstrip("/").split("/")[-1]
                 annotators.add(annotator_name)
     return sorted(annotators)
+
+
+async def enumerate_merged_paths(
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    """S3 URIs of a dataset's merged files (``merged.parquet`` or JSONL blocks)."""
+    return await _enumerate_merged_paths(
+        s3_client, bucket, prefix, dataset_name, annotator
+    )
+
+
+def enumerate_merged_paths_sync(
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            filename = key.rsplit("/", 1)[-1]
+            if _is_merged_file(key, filename, annotator):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
+
+
+async def _enumerate_merged_paths(
+    s3_client: "S3Client",
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    annotator: str | None = None,
+) -> list[str]:
+    search_prefix = f"{prefix}/{dataset_name}/"
+    if annotator:
+        search_prefix += f"annotations/{annotator}/"
+
+    paths: list[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    async for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            filename = key.rsplit("/", 1)[-1]
+            if _is_merged_file(key, filename, annotator):
+                paths.append(f"s3://{bucket}/{key}")
+    return sorted(paths)
+
+
+def _is_merged_file(key: str, filename: str, annotator: str | None) -> bool:
+    if filename == "merged.parquet":
+        return bool(annotator or "/annotations/" not in key)
+    return (
+        filename.startswith("merged_")
+        and filename.endswith(".jsonl.gz")
+        and (bool(annotator) or "/annotations/" not in key)
+    )
 
 
 async def enumerate_parquet_paths(
@@ -526,6 +594,7 @@ class MergeCandidate(BaseModel):
     jsonl_keys: list[str] = []
     manifest_keys: list[str] = []
     existing_parquet_key: str | None = None
+    existing_block_keys: list[str] = []
     deduplicate_on: list[str] = []
     merged_schema: pa.Schema | None = None
 

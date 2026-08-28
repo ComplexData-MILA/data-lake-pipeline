@@ -6,3 +6,6 @@ aiobotocore[pyarrow]>=2.11.0
 aioboto3>=15.0.0
 pydantic>=2.5.0
 python-dotenv>=1.0.0
+redis>=5.0
+sse-starlette>=2.0
+pytz>=2024.1
