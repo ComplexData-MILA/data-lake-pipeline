@@ -109,7 +109,7 @@ class TestKeysetPagination:
         seen = []
         cursor = None
         for _ in range(10):
-            params = {"page_size": 3, "columns": "id,text,value"}
+            params = {"page_size": 3, "columns": "id,text,value", "sort": "id", "sort_dir": "asc"}
             if cursor is not None:
                 params["cursor"] = cursor
             resp = client.get(f"/datasets/{d}/data", params=params)
@@ -145,7 +145,8 @@ class TestKeysetPagination:
     def test_first_page_next_cursor_and_has_more(self, client, keyset_dataset):
         d = keyset_dataset["dataset_name"]
         resp = client.get(
-            f"/datasets/{d}/data", params={"page_size": 3, "columns": "id"}
+            f"/datasets/{d}/data",
+            params={"page_size": 3, "columns": "id", "sort": "id", "sort_dir": "asc"},
         )
         data = resp.json()
         assert data["has_more"] is True
@@ -155,7 +156,8 @@ class TestKeysetPagination:
     def test_last_page_has_more_false(self, client, keyset_dataset):
         d = keyset_dataset["dataset_name"]
         resp = client.get(
-            f"/datasets/{d}/data", params={"page_size": 50, "columns": "id"}
+            f"/datasets/{d}/data",
+            params={"page_size": 50, "columns": "id", "sort": "id", "sort_dir": "asc"},
         )
         data = resp.json()
         assert data["has_more"] is False
@@ -181,6 +183,8 @@ class TestKeysetFallback:
                 "page_size": 2,
                 "columns": "id,value",
                 "filters": filters,
+                "sort": "id",
+                "sort_dir": "asc",
             },
         )
         assert resp.status_code == 200, resp.text
@@ -201,6 +205,8 @@ class TestKeysetFallback:
                     "page_size": 2,
                     "columns": "id,value",
                     "filters": filters,
+                    "sort": "id",
+                    "sort_dir": "asc",
                     "cursor": cursor,
                 },
             )

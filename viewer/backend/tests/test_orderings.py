@@ -82,7 +82,9 @@ def client(tmp_path, monkeypatch):
 
 
 def _filter_params(**extra):
-    params = {"page_size": 3, "columns": "id,value"}
+    # Pin ascending id order: the endpoint's default flipped to id DESC
+    # (newest first) but these tests assert the ascending chain mechanics.
+    params = {"page_size": 3, "columns": "id,value", "sort": "id", "sort_dir": "asc"}
     params.update(extra)
     return params
 
@@ -154,7 +156,7 @@ class TestOrderingPath:
         d = ordering_dataset["dataset_name"]
         filters = json.dumps({"base": {"field": "value", "op": "gte", "value": 3}})
         rsh = orderings.rowset_hash({}, json.loads(filters))
-        oh = orderings.order_hash(rsh, None, "asc")
+        oh = orderings.order_hash(rsh, "id", "asc")
         path = orderings.ordering_path(d, rsh, oh)
 
         client.get(f"/datasets/{d}/data", params=_filter_params(filters=filters))

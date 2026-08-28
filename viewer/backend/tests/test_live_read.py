@@ -332,7 +332,12 @@ class TestMergedBlocks:
 
             resp = client.get(
                 f"/datasets/{ds['dataset_name']}/data",
-                params={"page_size": 50, "columns": "id,text"},
+                params={
+                    "page_size": 50,
+                    "columns": "id,text",
+                    "sort": "id",
+                    "sort_dir": "asc",
+                },
             )
             assert resp.status_code == 200, resp.text
             rows = resp.json()["rows"]
