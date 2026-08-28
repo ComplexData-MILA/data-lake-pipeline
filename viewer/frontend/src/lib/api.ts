@@ -6,6 +6,7 @@ import type {
   CountResponse,
   ConversionResponse,
   ActivityResponse,
+  ActivityDataset,
   CategoricalResponse,
 } from "@/types";
 
@@ -124,6 +125,71 @@ export async function fetchActivity(
   return res.json();
 }
 
+export interface ActivityStreamCallbacks {
+  onWindow?: (w: {
+    window: { start: string | null; end: string | null };
+    bucket: string;
+    generated_at: string;
+  }) => void;
+  onDataset?: (d: ActivityDataset) => void;
+  onDone?: () => void;
+  onError?: (message: string) => void;
+}
+
+/**
+ * Fetch /activity in NDJSON streaming mode: per-dataset buckets arrive as the
+ * backend computes them (progressive chart population), and cancelling aborts
+ * the fetch so the server stops computing the remaining datasets.
+ */
+export function fetchActivityStream(
+  bucket: string,
+  minutes: number,
+  callbacks: ActivityStreamCallbacks
+): StreamControl {
+  const controller = new AbortController();
+  const params = new URLSearchParams();
+  params.set("bucket", bucket);
+  params.set("minutes", String(minutes));
+  params.set("format", "ndjson");
+
+  const done = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/activity?${params}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) throw new Error("Failed to stream activity");
+      await readNdjson(res, (msg) => {
+        switch (msg.type) {
+          case "window":
+            callbacks.onWindow?.(
+              msg as unknown as {
+                window: { start: string | null; end: string | null };
+                bucket: string;
+                generated_at: string;
+              }
+            );
+            break;
+          case "dataset":
+            callbacks.onDataset?.(msg as unknown as ActivityDataset);
+            break;
+          case "done":
+            callbacks.onDone?.();
+            break;
+          case "error":
+            callbacks.onError?.(String(msg.message ?? "Activity failed"));
+            break;
+        }
+      });
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        callbacks.onError?.((err as Error).message);
+      }
+    }
+  })();
+
+  return { cancel: () => controller.abort(), done };
+}
+
 export interface CategoricalParams {
   column: string;
   mode: "counts" | "trend";
@@ -181,6 +247,42 @@ export interface StreamControl {
 }
 
 /**
+ * Consume an NDJSON response body line by line, invoking *onMessage* per
+ * parsed message. Stops dispatching once a terminal message ("done"/"error")
+ * was seen (mid-stream error lines after that point are ignored).
+ */
+async function readNdjson(
+  res: Response,
+  onMessage: (msg: Record<string, unknown>) => void
+): Promise<void> {
+  if (!res.body) throw new Error("Empty response body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finished = false;
+  const handleLine = (line: string) => {
+    if (!line.trim() || finished) return;
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return; // ignore malformed lines
+    }
+    if (msg.type === "done" || msg.type === "error") finished = true;
+    onMessage(msg);
+  };
+  for (;;) {
+    const { value, done: streamDone } = await reader.read();
+    if (streamDone) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    lines.forEach(handleLine);
+  }
+  if (buffer) handleLine(buffer);
+}
+
+/**
  * Fetch /data in NDJSON streaming mode: rows arrive in batches as the backend
  * produces them (progressive table population for slow filtered scans).
  */
@@ -210,36 +312,23 @@ export function fetchDataStream(
         signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error("Failed to stream data");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
       let finished = false;
-      const handleLine = (line: string) => {
-        if (!line.trim() || finished) return;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "meta") {
-            callbacks.onMeta?.(msg);
-          } else if (msg.type === "row") {
-            callbacks.onRows?.([msg.row]);
-          } else if (msg.type === "done" || msg.type === "error") {
-            finished = true;
-            if (msg.type === "done") callbacks.onDone?.();
-            else callbacks.onError?.(msg.message || "Stream error");
-          }
-        } catch {
-          // ignore malformed lines
+      await readNdjson(res, (msg) => {
+        if (msg.type === "meta") {
+          callbacks.onMeta?.(
+            msg as unknown as {
+              columns: string[];
+              annotator_columns: Record<string, string[]>;
+            }
+          );
+        } else if (msg.type === "row") {
+          callbacks.onRows?.([msg.row as Record<string, unknown>]);
+        } else if (msg.type === "done" || msg.type === "error") {
+          finished = true;
+          if (msg.type === "done") callbacks.onDone?.();
+          else callbacks.onError?.(String(msg.message ?? "Stream error"));
         }
-      };
-      for (;;) {
-        const { value, done: streamDone } = await reader.read();
-        if (streamDone) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        lines.forEach(handleLine);
-      }
-      if (buffer) handleLine(buffer);
+      });
       if (!finished) callbacks.onDone?.();
     } catch (err) {
       if ((err as Error).name !== "AbortError") {

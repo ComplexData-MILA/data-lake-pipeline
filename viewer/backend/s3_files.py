@@ -37,6 +37,11 @@ class FileManifest(BaseModel):
     annotators: dict[str, AnnotatorFiles] = Field(default_factory=dict)
     index_files: list[str] = Field(default_factory=list)
     batch_meta: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # s3:// URI -> ISO 8601 LastModified. Files are immutable once written
+    # (chunks are uploaded whole; merged blocks are rewritten only by
+    # merges/conversion, which only get *newer*), so every row's _created_at
+    # is <= its file's mtime. Chart window pruning relies on that invariant.
+    file_mtimes: dict[str, str] = Field(default_factory=dict)
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -55,6 +60,9 @@ def build_file_manifest(
     for page in paginator.paginate(Bucket=bucket, Prefix=search_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
+            manifest.file_mtimes[f"s3://{bucket}/{key}"] = str(
+                obj.get("LastModified", "")
+            )
             rel = key[len(search_prefix):]
             parts = rel.split("/")
             filename = rel.rsplit("/", 1)[-1]

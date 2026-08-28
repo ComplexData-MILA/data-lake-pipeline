@@ -191,6 +191,43 @@ class TestActivity:
         resp = client.get("/activity", params={"minutes": 0})
         assert resp.status_code == 422
 
+    def test_ndjson_stream_matches_json(self, client, charts_datasets):
+        """The streaming variant yields the same per-dataset buckets."""
+        json_data = client.get(
+            "/activity", params={"bucket": "1m", "minutes": 1440}
+        ).json()
+        resp = client.get(
+            "/activity", params={"bucket": "1m", "minutes": 1440, "format": "ndjson"}
+        )
+        assert resp.status_code == 200, resp.text
+        lines = [json.loads(l) for l in resp.text.splitlines() if l.strip()]
+        types = [l["type"] for l in lines]
+        assert types[0] == "window"
+        assert types[-1] == "done"
+        streamed = {
+            l["dataset"]: l["buckets"]
+            for l in lines[1:-1]
+            if l["type"] == "dataset"
+        }
+        expected = {
+            d["dataset"]: d["buckets"] for d in json_data["datasets"]
+        }
+        assert streamed == expected
+
+    def test_ndjson_window_line(self, client, charts_datasets):
+        resp = client.get(
+            "/activity", params={"bucket": "5m", "minutes": 60, "format": "ndjson"}
+        )
+        assert resp.status_code == 200, resp.text
+        lines = [json.loads(l) for l in resp.text.splitlines() if l.strip()]
+        window = lines[0]
+        assert window["type"] == "window"
+        assert window["bucket"] == "5m"
+        assert window["window"]["start"] is not None
+        assert window["window"]["end"] is not None
+        assert all(l["type"] == "dataset" for l in lines[1:-1])
+        assert lines[-1] == {"type": "done"}
+
 
 class TestCategorical:
     def test_counts_topk_total_distinct(self, client, charts_datasets):

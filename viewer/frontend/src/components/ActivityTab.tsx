@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Data, Layout } from "plotly.js";
-import { fetchActivity } from "@/lib/api";
-import type { ActivityResponse } from "@/types";
+import { fetchActivityStream } from "@/lib/api";
+import type { StreamControl } from "@/lib/api";
+import type { ActivityDataset, ActivityResponse } from "@/types";
 import { useLiveStore } from "@/hooks/useLiveStore";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { useViewerStore } from "@/hooks/useUrlState";
@@ -43,28 +44,62 @@ export function ActivityTab() {
 
   useEffect(() => {
     let cancelled = false;
+    let stream: StreamControl | null = null;
     setLoading(true);
-    // Debounce: SSE bursts trigger a single refetch.
+    setError(null);
+    // Debounce: SSE bursts trigger a single refetch. The fetch is streamed
+    // (NDJSON): per-dataset results render as they arrive, and aborting on
+    // unmount/param change lets the server skip the remaining datasets.
     const t = setTimeout(() => {
-      fetchActivity(bucket, minutes)
-        .then((d) => {
-          if (!cancelled) {
-            setData(d);
-            setError(null);
-          }
-        })
-        .catch((e) => {
-          if (!cancelled) {
-            setError(e instanceof Error ? e.message : "Failed to load activity");
-          }
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
+      const seen = new Set<string>();
+      stream = fetchActivityStream(bucket, minutes, {
+        onWindow: (w) => {
+          if (cancelled) return;
+          setData((prev) => ({ ...(prev ?? { datasets: [] }), ...w }));
+        },
+        onDataset: (d: ActivityDataset) => {
+          if (cancelled) return;
+          seen.add(d.dataset);
+          setData((prev) => ({
+            ...(prev ?? {
+              datasets: [],
+              window: { start: null, end: null },
+              bucket,
+              generated_at: "",
+            }),
+            datasets: [
+              ...(prev?.datasets ?? []).filter(
+                (x) => x.dataset !== d.dataset
+              ),
+              d,
+            ],
+          }));
+        },
+        onDone: () => {
+          if (cancelled) return;
+          // Drop entries for datasets that no longer exist (each fresh
+          // stream re-sends every dataset, so anything not seen is stale).
+          setData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  datasets: prev.datasets.filter((x) => seen.has(x.dataset)),
+                }
+              : prev
+          );
+          setLoading(false);
+        },
+        onError: (message) => {
+          if (cancelled) return;
+          setError(message);
+          setLoading(false);
+        },
+      });
     }, 300);
     return () => {
       cancelled = true;
       clearTimeout(t);
+      stream?.cancel();
     };
   }, [bucket, minutes, refreshNonce, retryNonce]);
 

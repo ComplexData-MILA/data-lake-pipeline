@@ -256,6 +256,16 @@ class CategoricalResponse(BaseModel):
     generated_at: str
 
 
+def _is_data_object_key(key: str) -> bool:
+    """True for keys holding base/annotator data rows (not manifests/status)."""
+    filename = key.rsplit("/", 1)[-1]
+    return (
+        key.endswith("/merged.parquet")
+        or key.endswith(".jsonl")
+        or (filename.startswith("merged_") and filename.endswith(".jsonl.gz"))
+    )
+
+
 def _prefix_contains_data(
     client,
     bucket: str,
@@ -265,17 +275,22 @@ def _prefix_contains_data(
 
     JSONL chunks count so datasets/annotators with only live (unmerged) data
     are still listed.
+
+    Fast path: batch dirs are numbered in creation order and their files sort
+    right after the few ``_index``/``_migration`` objects, so one listing page
+    almost always contains data when the dataset has any — a single S3 call
+    instead of paginating every object (datasets with dozens of batches each
+    have tens of thousands of objects). The full pagination stays as the
+    fallback for layouts that don't fit the fast-path assumption.
     """
+    page = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
+    for obj in page.get("Contents", []):
+        if _is_data_object_key(obj["Key"]):
+            return True
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            filename = key.rsplit("/", 1)[-1]
-            if (
-                key.endswith("/merged.parquet")
-                or key.endswith(".jsonl")
-                or (filename.startswith("merged_") and filename.endswith(".jsonl.gz"))
-            ):
+    for p in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in p.get("Contents", []):
+            if _is_data_object_key(obj["Key"]):
                 return True
     return False
 
@@ -877,17 +892,237 @@ async def get_events(request: Request, dataset: str = Query(default="")):
     return await events_handler(request, dataset)
 
 
+def _files_in_window(
+    files: list[str], manifest: FileManifest, window_start: str | None
+) -> list[str]:
+    """Keep files whose rows can fall inside [*window_start*, now).
+
+    A file's S3 LastModified is always >= every row's ``_created_at`` in it
+    (chunks are uploaded whole right after the rows are created; merges and
+    conversions only rewrite files later), so a file older than the window
+    cannot contain in-window rows. Files without a recorded mtime are kept
+    (fail safe). Without a window nothing is pruned.
+    """
+    if window_start is None:
+        return files
+    try:
+        cutoff = datetime.fromisoformat(window_start)
+    except ValueError:
+        return files
+    kept: list[str] = []
+    for path in files:
+        mtime = manifest.file_mtimes.get(path)
+        if mtime is None:
+            kept.append(path)
+            continue
+        try:
+            if datetime.fromisoformat(mtime) >= cutoff:
+                kept.append(path)
+        except ValueError:
+            kept.append(path)
+    return kept
+
+
+def _activity_dataset_entry(
+    ds: str,
+    manifest: FileManifest,
+    interval: str,
+    window_start: str | None,
+    window_end: str | None,
+) -> dict:
+    """Bucket counts for one dataset's activity plot (window-pruned)."""
+    if not _schema_has_created_at(ds, manifest):
+        # All rows predate the _created_at field — nothing to chart.
+        return {"dataset": ds, "buckets": []}
+    parquet_paths = _files_in_window(manifest.merged_parquet, manifest, window_start)
+    jsonl_paths = _files_in_window(
+        manifest.merged_jsonl + manifest.live_jsonl, manifest, window_start
+    )
+    if not _union_source(parquet_paths, jsonl_paths):
+        return {"dataset": ds, "buckets": []}
+    query, params = charts.build_activity_query(
+        parquet_paths, jsonl_paths, interval, window_start, window_end
+    )
+    rows = execute_query(query, params)
+    return {
+        "dataset": ds,
+        "buckets": [{"ts": str(r["ts"]), "count": r["cnt"]} for r in rows],
+    }
+
+
+def _stream_activity_ndjson(
+    request: Request, bucket: str, minutes: int | None
+) -> StreamingResponse:
+    """NDJSON streaming variant of /activity.
+
+    Line protocol: {"type":"window","window":{...},"bucket":...,
+    "generated_at":...} then {"type":"dataset","dataset":...,"buckets":[...]}
+    per dataset as it completes (newest results stream to the plot while the
+    remaining datasets are still being computed), ending with {"type":"done"}
+    — or {"type":"error","message":...} on failure. A cached payload (same
+    key as the JSON variant) is replayed without recomputation. The producer
+    stops between datasets when the client disconnects, so navigating away
+    from the tab aborts the remaining work.
+    """
+    cache_key = activity_key(bucket, minutes)
+
+    def _read_cached_payload():
+        if _redis_sync is None:
+            return None
+        try:
+            raw = _redis_sync.get(cache_key)
+            return json.loads(raw) if raw is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    now = datetime.now(timezone.utc)
+    window_end = now.isoformat()
+    window_start = (
+        (now - timedelta(minutes=minutes)).isoformat() if minutes else None
+    )
+    window_line = {
+        "type": "window",
+        "window": {"start": window_start, "end": window_end},
+        "bucket": bucket,
+        "generated_at": now.isoformat(),
+    }
+    interval = charts.BUCKET_INTERVALS[bucket]
+
+    async def gen():
+        # Sync Redis read off the event loop (matches the JSON path, which
+        # runs inside anyio.to_thread).
+        cached_payload = await anyio.to_thread.run_sync(_read_cached_payload)
+        if cached_payload is not None:
+            # Replay the cached computation; emit its window (not a fresh one)
+            # so the client sees the bounds the data was actually computed for.
+            yield _ndjson_line(
+                {
+                    "type": "window",
+                    "window": cached_payload.get("window", window_line["window"]),
+                    "bucket": cached_payload.get("bucket", bucket),
+                    "generated_at": cached_payload.get(
+                        "generated_at", window_line["generated_at"]
+                    ),
+                }
+            )
+            for entry in cached_payload.get("datasets", []):
+                yield _ndjson_line({"type": "dataset", **entry})
+            yield _ndjson_line({"type": "done"})
+            return
+        yield _ndjson_line(window_line)
+
+        stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        # Bounded queue: a slow client stalls the producer thread instead of
+        # buffering unbounded dataset results in memory.
+        queue: asyncio.Queue = asyncio.Queue(
+            maxsize=int(os.environ.get("VIEWER_NDJSON_QUEUE_SIZE", "2"))
+        )
+
+        def _put(item) -> bool:
+            """Blocking put with backpressure; False when the stream stopped."""
+            while not stop.is_set():
+                fut = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+                try:
+                    fut.result(timeout=0.5)
+                    return True
+                except Exception:
+                    continue
+            return False
+
+        def producer():
+            payload = {
+                "datasets": [],
+                "window": window_line["window"],
+                "bucket": bucket,
+                "generated_at": window_line["generated_at"],
+            }
+            try:
+                datasets = cached_sync(
+                    _redis_sync, datasets_key(), 60, list_datasets_from_s3
+                )
+                for ds in datasets:
+                    if stop.is_set():
+                        return
+                    try:
+                        manifest = _manifest_for(ds, False)
+                        entry = _activity_dataset_entry(
+                            ds, manifest, interval, window_start, window_end
+                        )
+                    except db.PoolTimeout:
+                        entry = {
+                            "dataset": ds,
+                            "buckets": [],
+                            "error": "server busy; retry shortly",
+                        }
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Activity failed for {ds}: {e}")
+                        entry = {"dataset": ds, "buckets": [], "error": str(e)}
+                    payload["datasets"].append(entry)
+                    if not _put({"type": "dataset", **entry}):
+                        return
+                if stop.is_set():
+                    return
+                if _redis_sync is not None:
+                    try:
+                        _redis_sync.set(
+                            cache_key,
+                            json.dumps(payload, default=str),
+                            ex=60,
+                        )
+                        _redis_sync.sadd(activity_keys_set(), cache_key)
+                        _redis_sync.expire(activity_keys_set(), 240)
+                    except Exception:  # noqa: BLE001
+                        pass
+                _put({"type": "done"})
+            finally:
+                _put(None)
+
+        task = asyncio.create_task(asyncio.to_thread(producer))
+        try:
+            while True:
+                if await request.is_disconnected():
+                    stop.set()
+                    break
+                item = await queue.get()
+                if item is None:
+                    break
+                yield _ndjson_line(item)
+        finally:
+            try:
+                await asyncio.wait_for(task, timeout=10.0)
+            except asyncio.TimeoutError:
+                # The producer is still finishing a DuckDB query for a
+                # client that is already gone — let it run out on its own.
+                pass
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/activity", response_model=ActivityResponse)
 async def get_activity(
+    request: Request,
     bucket: str = Query(default="1m"),
     minutes: int | None = Query(default=1440, ge=1, le=43200),
+    format: str = Query(default="json", pattern="^(json|ndjson)$"),
 ):
-    """Rows created per time bucket for every dataset (from _created_at)."""
+    """Rows created per time bucket for every dataset (from _created_at).
+
+    Only files whose batches can intersect the window are read (mtime
+    pruning). ``format=ndjson`` streams per-dataset results as they complete
+    and stops computing when the client disconnects.
+    """
     if bucket not in charts.BUCKET_INTERVALS:
         raise HTTPException(
             status_code=422,
             detail=f"bucket must be one of {sorted(charts.BUCKET_INTERVALS)}",
         )
+    if format == "ndjson":
+        return _stream_activity_ndjson(request, bucket, minutes)
 
     def compute() -> dict:
         now = datetime.now(timezone.utc)
@@ -898,29 +1133,8 @@ async def get_activity(
         out: list[dict] = []
         for ds in datasets:
             manifest = _manifest_for(ds, False)
-            if not _schema_has_created_at(ds, manifest):
-                # All rows predate the _created_at field — nothing to chart.
-                out.append({"dataset": ds, "buckets": []})
-                continue
-            src = _union_source(
-                manifest.merged_parquet, manifest.merged_jsonl + manifest.live_jsonl
-            )
-            if not src:
-                out.append({"dataset": ds, "buckets": []})
-                continue
-            query, params = charts.build_activity_query(
-                manifest.merged_parquet,
-                manifest.merged_jsonl + manifest.live_jsonl,
-                interval,
-                window_start,
-                window_end,
-            )
-            rows = execute_query(query, params)
             out.append(
-                {
-                    "dataset": ds,
-                    "buckets": [{"ts": str(r["ts"]), "count": r["cnt"]} for r in rows],
-                }
+                _activity_dataset_entry(ds, manifest, interval, window_start, window_end)
             )
         return {
             "datasets": out,
@@ -971,7 +1185,6 @@ async def get_categorical(
 
     def attempt(fresh: bool) -> dict:
         manifest = _manifest_for(dataset_name, fresh)
-        merged_jsonl = manifest.merged_jsonl + manifest.live_jsonl
         now = datetime.now(timezone.utc)
         window_end = now.isoformat()
         window_start = (
@@ -979,6 +1192,14 @@ async def get_categorical(
         )
         window = {"start": window_start, "end": window_end}
         generated_at = now.isoformat()
+        # Only read files whose rows can intersect the window (see
+        # _files_in_window); batches predating it cannot contribute rows.
+        merged_parquet = _files_in_window(
+            manifest.merged_parquet, manifest, window_start
+        )
+        merged_jsonl = _files_in_window(
+            manifest.merged_jsonl + manifest.live_jsonl, manifest, window_start
+        )
 
         if not _schema_has_created_at(dataset_name, manifest):
             # All rows predate the _created_at field — nothing to chart.
@@ -992,7 +1213,7 @@ async def get_categorical(
 
         if mode == "counts":
             query, params = charts.build_categorical_counts_query(
-                manifest.merged_parquet,
+                merged_parquet,
                 merged_jsonl,
                 column,
                 limit,
@@ -1018,7 +1239,7 @@ async def get_categorical(
         # Trend mode: series of (bucket, category) counts; top values are
         # derived from the series (topk ∪ {"other"} are its only categories).
         query, params = charts.build_categorical_trend_query(
-            manifest.merged_parquet,
+            merged_parquet,
             merged_jsonl,
             column,
             charts.BUCKET_INTERVALS[bucket],

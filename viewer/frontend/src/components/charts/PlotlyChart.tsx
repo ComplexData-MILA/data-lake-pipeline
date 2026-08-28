@@ -15,6 +15,12 @@ interface PlotlyEventTarget {
   removeListener: (event: string, handler: (evt: unknown) => void) => void;
 }
 
+function isPlotlyEventTarget(
+  el: HTMLDivElement
+): el is HTMLDivElement & PlotlyEventTarget {
+  return typeof (el as unknown as PlotlyEventTarget).on === "function";
+}
+
 const BASE_CONFIG = { responsive: true, displaylogo: false } as const;
 
 export interface PlotlyChartProps {
@@ -42,19 +48,35 @@ export function PlotlyChart({
   dataRef.current = data;
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
+  // Latest legend handler via ref: the mount effect binds once (after plotly
+  // has attached .on to the div), so a prop change must not require a rebind.
+  const onLegendClickRef = useRef(onLegendClick);
+  onLegendClickRef.current = onLegendClick;
 
   useEffect(() => {
-    // Mount
+    // Mount. The legend listener is bound only after newPlot resolves: the
+    // bare div has no .on before plotly touches it (calling it earlier
+    // throws "el.on is not a function").
     let cancelled = false;
+    const el = elRef.current;
+    if (!el) return;
+    const legendHandler = (evt: unknown) =>
+      onLegendClickRef.current?.(evt as LegendClickEvent);
     loadPlotly().then((Plotly) => {
       if (cancelled || !elRef.current) return;
       Plotly.newPlot(elRef.current, dataRef.current, layoutRef.current, {
         ...BASE_CONFIG,
         ...config,
       });
+      if (onLegendClickRef.current && isPlotlyEventTarget(el)) {
+        el.on("plotly_legendclick", legendHandler);
+      }
     });
     return () => {
       cancelled = true;
+      if (isPlotlyEventTarget(el)) {
+        el.removeListener("plotly_legendclick", legendHandler);
+      }
       loadPlotly().then((Plotly) => {
         if (elRef.current) Plotly.purge(elRef.current);
       });
@@ -83,17 +105,6 @@ export function PlotlyChart({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  useEffect(() => {
-    // Legend clicks -> external toggle sync
-    const el = elRef.current as unknown as PlotlyEventTarget | null;
-    if (!el || !onLegendClick) return;
-    const handler = onLegendClick as unknown as (evt: unknown) => void;
-    el.on("plotly_legendclick", handler);
-    return () => {
-      el.removeListener("plotly_legendclick", handler);
-    };
-  }, [onLegendClick]);
 
   return <div ref={elRef} className={className} />;
 }
