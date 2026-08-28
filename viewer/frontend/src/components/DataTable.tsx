@@ -176,6 +176,9 @@ export function DataTable() {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [responseColumns, setResponseColumns] = useState<string[]>([]);
   const [loading, setLoading] = useState(false); // first page
+  // Dataset the current rows were fetched for — lets the skeleton take over
+  // the moment the dataset changes, before the new fetch even starts.
+  const [loadedDataset, setLoadedDataset] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState(0);
@@ -248,10 +251,24 @@ export function DataTable() {
     [displayColumns, columnWidths]
   );
 
+  // One grid template shared by the header and every row: fr tracks
+  // proportional to the computed pixel widths keep each column the same
+  // relative size whether the container stretches or scrolls.
+  const gridTemplateColumns = useMemo(
+    () =>
+      displayColumns
+        .map(
+          (col) => `minmax(0, ${(columnWidths[col] ?? MIN_COLUMN_WIDTH).toFixed(1)}fr)`
+        )
+        .join(" "),
+    [displayColumns, columnWidths]
+  );
+
   // First page / full reset fetch.
   useEffect(() => {
     if (!dataset) {
       setRows([]);
+      setLoadedDataset(null);
       setTotalCount(0);
       setError(null);
       return;
@@ -276,6 +293,7 @@ export function DataTable() {
       .then((data) => {
         if (cancelled) return;
         setRows(data.rows);
+        setLoadedDataset(dataset);
         setResponseColumns(data.columns);
         // Keyset/ordering responses always carry has_more; the scan fallback
         // doesn't, so its absence switches to page-number chaining.
@@ -288,6 +306,10 @@ export function DataTable() {
       })
       .catch((err) => {
         if (cancelled) return;
+        // Drop rows from the previous dataset so a failed switch shows the
+        // error + empty state, not stale data or a permanent skeleton.
+        setRows([]);
+        setLoadedDataset(dataset);
         setError(err instanceof Error ? err.message : "Failed to load data");
       })
       .finally(() => {
@@ -382,9 +404,9 @@ export function DataTable() {
   };
 
   const getSortIcon = (column: string) => {
-    if (sort !== column) return <ArrowUpDown className="h-3 w-3 ml-1 inline" />;
-    if (sortDir === "asc") return <ArrowUp className="h-3 w-3 ml-1 inline" />;
-    return <ArrowDown className="h-3 w-3 ml-1 inline" />;
+    if (sort !== column) return <ArrowUpDown className="h-3 w-3 shrink-0" />;
+    if (sortDir === "asc") return <ArrowUp className="h-3 w-3 shrink-0" />;
+    return <ArrowDown className="h-3 w-3 shrink-0" />;
   };
 
   const filterActive =
@@ -398,7 +420,9 @@ export function DataTable() {
     );
   }
 
-  if (loading && rows.length === 0) {
+  // Skeleton while the first page of the current dataset loads — including
+  // the moment the dataset changes, before the new fetch has even started.
+  if (loadedDataset !== dataset || (loading && rows.length === 0)) {
     return (
       <div className="space-y-4">
         <div>
@@ -463,63 +487,63 @@ export function DataTable() {
             )}
           </div>
         ) : (
-          // Raw table elements (not the ui/Table wrapper): the wrapper adds
-          // its own overflow container, which would break the virtualizer's
-          // scroll container and the sticky header.
-          <table
-            className="w-full caption-bottom text-sm"
-            style={{ tableLayout: "fixed", minWidth: totalColumnsWidth }}
+          // Div-grid table (not real <table>/<tr> elements): absolutely
+          // positioning rows for the virtualizer would turn each <tr> into
+          // its own anonymous table, so row cells would be sized by content
+          // instead of the header's <colgroup>. Sharing one gridTemplateColumns
+          // between the header and every row keeps the columns aligned by
+          // construction. (The ui/Table wrapper is also not used — its own
+          // overflow container would break the scroll container/sticky header.)
+          <div
+            role="table"
+            className="w-full text-sm"
+            style={{ minWidth: totalColumnsWidth }}
           >
-            <colgroup>
+            <div
+              role="row"
+              className="grid sticky top-0 z-10 bg-card border-b"
+              style={{ gridTemplateColumns: gridTemplateColumns }}
+            >
               {displayColumns.map((col) => (
-                <col key={col} style={{ width: columnWidths[col] }} />
+                <div
+                  key={col}
+                  role="columnheader"
+                  className="h-12 px-4 flex items-center gap-1 font-medium text-muted-foreground cursor-pointer hover:bg-muted/50"
+                  onClick={() => handleSort(col)}
+                >
+                  <span className="truncate min-w-0">{renderColumnHeader(col)}</span>
+                  {getSortIcon(col)}
+                </div>
               ))}
-            </colgroup>
-            <thead className="[&_tr]:border-b sticky top-0 z-10 bg-card">
-              <tr>
-                {displayColumns.map((col) => (
-                  <th
-                    key={col}
-                    className="h-12 px-4 text-left align-middle font-medium text-muted-foreground cursor-pointer hover:bg-muted/50"
-                    onClick={() => handleSort(col)}
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      <span className="truncate">{renderColumnHeader(col)}</span>
-                      {getSortIcon(col)}
-                    </span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody
-              className="[&_tr:last-child]:border-0"
+            </div>
+            <div
               style={{ height: virtualizer.getTotalSize(), position: "relative" }}
             >
               {virtualRows.map((vr) => {
                 const row = rows[vr.index];
                 return (
-                  <tr
+                  <div
                     key={`${String(row.id)}:${String(row._batch)}`}
+                    role="row"
                     data-index={vr.index}
                     ref={virtualizer.measureElement}
-                    className="border-b transition-colors hover:bg-muted/50 absolute top-0 left-0 w-full cursor-pointer"
-                    style={{ transform: `translateY(${vr.start}px)` }}
+                    className="grid absolute top-0 left-0 w-full border-b transition-colors hover:bg-muted/50 cursor-pointer"
+                    style={{
+                      gridTemplateColumns: gridTemplateColumns,
+                      transform: `translateY(${vr.start}px)`,
+                    }}
                     onClick={() => setSelectedId(String(row.id))}
                   >
                     {displayColumns.map((col) => (
-                      <td
-                        key={col}
-                        className="p-4 align-top"
-                        style={{ width: columnWidths[col] }}
-                      >
+                      <div key={col} role="cell" className="p-4 min-w-0">
                         <div className="line-clamp-3">{renderCellContent(row[col])}</div>
-                      </td>
+                      </div>
                     ))}
-                  </tr>
+                  </div>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          </div>
         )}
         <div
           ref={sentinelRef}

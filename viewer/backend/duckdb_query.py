@@ -253,15 +253,20 @@ def build_query(
             join_parts.append(f'{join_type} "{ann}" USING (id)')
         join_clause = " " + " ".join(join_parts)
 
-    order_clause = ' ORDER BY "base"."id" ASC'
+    # Default order is id with the request direction; id DESC = newest first.
+    direction = "DESC" if sort_dir == "desc" else "ASC"
+    order_clause = f' ORDER BY "base"."id" {direction}'
     if sort:
         _quote_identifier("base", sort)
-        if sort == "_batch" or sort in base_cols:
-            direction = "DESC" if sort_dir == "desc" else "ASC"
+        if sort == "id":
+            order_clause = f' ORDER BY "base"."id" {direction}'
+        elif sort == "_batch":
+            order_clause = (
+                f' ORDER BY "base"."_batch" {direction}, "base"."id" ASC'
+            )
+        elif sort in base_cols:
             order_clause = (
                 f' ORDER BY "base"."{sort}" {direction}, "base"."id" ASC'
-                if sort != "_batch"
-                else f' ORDER BY "base"."_batch" {direction}, "base"."id" ASC'
             )
 
     query = (
@@ -876,7 +881,10 @@ def build_ordering_query(
         join_clause = " " + " ".join(join_parts)
 
     direction = "DESC" if sort_dir == "desc" else "ASC"
-    order_clause = f' ORDER BY {sort_expr} {direction}, "base"."id" ASC'
+    order_clause = f" ORDER BY {sort_expr} {direction}"
+    if sort and sort not in ("id", "_batch"):
+        # Column sorts break ties by id for a stable materialized order.
+        order_clause += ', "base"."id" ASC'
 
     query = (
         f"WITH {', '.join(ctes)} SELECT {', '.join(select_cols)} "

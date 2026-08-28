@@ -1189,7 +1189,9 @@ async def get_data(
     ),
     filters: str = Query(default="{}", description="JSON-encoded filter spec"),
     sort: str | None = Query(default=None),
-    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    # Newest-first is the default: rows arrive over time with increasing ids,
+    # so an id-descending default shows the most recent batch first.
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     row_id: str | None = Query(default=None, description="Fetch single row by ID"),
     cursor: str | None = Query(default=None, description="Keyset pagination cursor"),
     format: str = Query(default="json", pattern="^(json|ndjson)$"),

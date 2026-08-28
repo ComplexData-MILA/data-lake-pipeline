@@ -103,8 +103,11 @@ export const defaultState: ViewerState = {
     annotators: {},
   },
   selectedId: null,
-  sort: undefined,
-  sortDir: "asc",
+  // Newest-first default: ids increase over time, so id-descending shows the
+  // most recent batch's rows first (and puts an explicit indicator on the id
+  // column header instead of silently relying on the backend default).
+  sort: "id",
+  sortDir: "desc",
   theme: "system",
   stream: false,
 };
