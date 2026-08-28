@@ -1,6 +1,7 @@
 """FastAPI backend for data viewer."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -311,10 +312,24 @@ def list_datasets_from_s3() -> list[str]:
             if name and not name.startswith("annotations"):
                 candidate_names.append(name)
 
+    # One listing call per candidate; run them concurrently so the total
+    # latency is bounded by the slowest page, not the sum (boto3 clients are
+    # thread-safe for list operations).
     datasets: list[str] = []
-    for name in candidate_names:
-        if _prefix_contains_data(client, S3_BUCKET, f"{list_prefix}{name}/"):
-            datasets.append(name)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {
+            pool.submit(
+                _prefix_contains_data, client, S3_BUCKET, f"{list_prefix}{name}/"
+            ): name
+            for name in candidate_names
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                if future.result():
+                    datasets.append(name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to check dataset {name}: {e}")
     return sorted(datasets)
 
 
