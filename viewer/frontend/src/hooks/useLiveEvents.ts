@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { API_BASE } from "@/lib/api";
 import { useLiveStore } from "./useLiveStore";
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -75,7 +76,7 @@ export function useLiveEvents(
 
     const connect = () => {
       setStatus(retry > 1000 ? "reconnecting" : "connecting");
-      es = new EventSource(`/api/events?dataset=${encodeURIComponent(dataset)}`);
+      es = new EventSource(`${API_BASE}/events?dataset=${encodeURIComponent(dataset)}`);
 
       es.onopen = () => {
         retry = 1000;
